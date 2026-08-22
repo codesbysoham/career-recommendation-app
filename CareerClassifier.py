@@ -1,43 +1,18 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
-# Core libraries
-# Core libraries
+# Career recommendation backend
 import os
-import re
-import warnings
 import zipfile
+import warnings
 
 import numpy as np
 import pandas as pd
-
-# Visualization
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-# Streamlit
 import streamlit as st
 
-# Kaggle
 from kaggle.api.kaggle_api_extended import KaggleApi
-
-# ML + Stats
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.decomposition import PCA
-from scipy.cluster.hierarchy import dendrogram, linkage
 
 warnings.filterwarnings("ignore")
 
-sns.set_theme(style="whitegrid", font_scale=1.05)
-plt.rcParams.update({"figure.dpi": 150})
-
-# Excel files stored in GitHub
 DATA_PATHS = {
     "skills": "data/Skills.xlsx",
     "knowledge": "data/Knowledge.xlsx",
@@ -45,13 +20,15 @@ DATA_PATHS = {
 }
 
 POSTINGS_PATH = "data/postings.csv"
+KAGGLE_DATASET = "soham1510/career-postings-dataset"
 
 
-# =========================
-# DOWNLOAD POSTINGS FROM KAGGLE
-# =========================
+def download_postings():
+    """Download postings.csv from Kaggle only when it is not already present."""
+    if os.path.exists(POSTINGS_PATH):
+        return
 
-if not os.path.exists(POSTINGS_PATH):
+    os.makedirs("data", exist_ok=True)
 
     os.environ["KAGGLE_USERNAME"] = st.secrets["kaggle_username"]
     os.environ["KAGGLE_KEY"] = st.secrets["kaggle_key"]
@@ -60,156 +37,125 @@ if not os.path.exists(POSTINGS_PATH):
     api.authenticate()
 
     api.dataset_download_file(
-        "soham1510/career-postings-dataset",
+        KAGGLE_DATASET,
         "postings.csv",
         path="data",
-        force=True
+        force=True,
     )
 
-    # Kaggle may download the file as postings.csv.zip
-    if os.path.exists("data/postings.csv.zip"):
+    zip_path = "data/postings.csv.zip"
 
-        with zipfile.ZipFile("data/postings.csv.zip", "r") as zip_ref:
+    if os.path.exists(zip_path):
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall("data")
-
-        os.remove("data/postings.csv.zip")
-
-
-# =========================
-# LOAD DATA
-# =========================
-
-skills_df = pd.read_excel(DATA_PATHS["skills"])
-
-knowledge_df = pd.read_excel(DATA_PATHS["knowledge"])
-
-occupations_df = pd.read_excel(DATA_PATHS["occupations"])
-
-postings_df = pd.read_csv(
-    POSTINGS_PATH,
-    low_memory=False
-)
+        os.remove(zip_path)
 
 
-# In[3]:
+@st.cache_data(show_spinner="Loading datasets...")
+def load_data():
+    """Load the Excel files from GitHub and postings.csv from Kaggle."""
+    download_postings()
+
+    skills_df = pd.read_excel(DATA_PATHS["skills"])
+    knowledge_df = pd.read_excel(DATA_PATHS["knowledge"])
+    occupations_df = pd.read_excel(DATA_PATHS["occupations"])
+    postings_df = pd.read_csv(POSTINGS_PATH, low_memory=False)
+
+    return skills_df, knowledge_df, occupations_df, postings_df
 
 
-print("Skills head:\n", skills_df.head())
+@st.cache_resource(show_spinner="Building recommendation model...")
+def build_model(postings_df):
+    """Build the TF-IDF model once and cache it."""
+    postings_df = postings_df.copy()
+
+    title_col = next(
+        (c for c in postings_df.columns if "title" in c.lower()),
+        None,
+    )
+    desc_col = next(
+        (c for c in postings_df.columns if "descrip" in c.lower()),
+        None,
+    )
+    sal_col = next(
+        (
+            c for c in postings_df.columns
+            if "max_sal" in c.lower() or "salary" in c.lower()
+        ),
+        None,
+    )
+    loc_col = next(
+        (c for c in postings_df.columns if "location" in c.lower()),
+        None,
+    )
+
+    rename = {}
+
+    if title_col:
+        rename[title_col] = "job_title"
+    if desc_col:
+        rename[desc_col] = "description"
+    if sal_col:
+        rename[sal_col] = "max_salary"
+    if loc_col:
+        rename[loc_col] = "location"
+
+    postings_df.rename(columns=rename, inplace=True)
+
+    if "job_title" not in postings_df.columns:
+        postings_df["job_title"] = "Unknown"
+
+    if "description" not in postings_df.columns:
+        postings_df["description"] = ""
+
+    if "max_salary" not in postings_df.columns:
+        postings_df["max_salary"] = np.nan
+
+    postings_df["job_title"] = postings_df["job_title"].fillna("Unknown")
+    postings_df["description"] = postings_df["description"].fillna("")
+
+    tfidf = TfidfVectorizer(
+        max_features=5000,
+        ngram_range=(1, 2),
+        stop_words="english",
+        min_df=2,
+        max_df=0.85,
+        sublinear_tf=True,
+    )
+
+    tfidf_matrix = tfidf.fit_transform(postings_df["description"])
+
+    return postings_df, tfidf, tfidf_matrix
 
 
-# In[4]:
+def load_pipeline():
+    """Load all data and build the cached recommendation model."""
+    skills_df, knowledge_df, occupations_df, raw_postings = load_data()
+
+    postings_df, tfidf, tfidf_matrix = build_model(raw_postings)
+
+    return {
+        "skills_df": skills_df,
+        "knowledge_df": knowledge_df,
+        "occupations_df": occupations_df,
+        "postings_df": postings_df,
+        "tfidf": tfidf,
+        "tfidf_matrix": tfidf_matrix,
+    }
 
 
-print("\nKnowledge head:\n", knowledge_df.head())
+def recommend_jobs(user_skills, tfidf, tfidf_matrix, postings_df, top_n=5):
+    """Return the top job postings matching the selected skills."""
+    user_text = " ".join(user_skills)
 
+    user_vec = tfidf.transform([user_text])
+    similarities = cosine_similarity(user_vec, tfidf_matrix)[0]
 
-# In[5]:
+    result = postings_df.copy()
+    result["similarity"] = similarities
 
-
-print("\nOccupations head:\n", occupations_df.head())
-
-
-# In[6]:
-
-
-print("\nPostings head:\n", postings_df.head())
-
-
-# In[7]:
-
-
-print("\nDescriptive statistics for postings:")
-print(postings_df.describe(include="all"))
-
-
-# In[8]:
-
-
-# Posting count by location
-plt.figure(figsize=(10,5))
-postings_df["location"].value_counts().head(15).plot(kind="bar", color="orange")
-plt.title("Top 15 Locations by Job Postings")
-plt.ylabel("Count")
-plt.show()
-
-
-# In[9]:
-
-
-# Example: TF-IDF on job descriptions
-tfidf = TfidfVectorizer(max_features=5000, stop_words="english")
-tfidf_matrix = tfidf.fit_transform(postings_df["description"].fillna(""))
-
-print("TF-IDF matrix shape:", tfidf_matrix.shape)
-
-# Flexible column detection
-title_col = next((c for c in postings_df.columns if "title" in c), None)
-desc_col  = next((c for c in postings_df.columns if "descrip" in c), None)
-sal_col   = next((c for c in postings_df.columns if "max_sal" in c or "salary" in c), None)
-loc_col   = next((c for c in postings_df.columns if "location" in c), None)
-
-rename = {}
-if title_col: rename[title_col] = "job_title"
-if desc_col:  rename[desc_col]  = "description"
-if sal_col:   rename[sal_col]   = "max_salary"
-if loc_col:   rename[loc_col]   = "location"
-
-postings_df.rename(columns=rename, inplace=True)
-
-# Ensure defaults if missing
-if "job_title" not in postings_df.columns:
-    postings_df["job_title"] = "Unknown"
-if "description" not in postings_df.columns:
-    postings_df["description"] = ""
-if "max_salary" not in postings_df.columns:
-    postings_df["max_salary"] = np.nan
-
-
-# Market signals
-market = postings_df.groupby("job_title").agg(
-    posting_count=("job_title","count"),
-    avg_salary=("max_salary","mean")
-).reset_index()
-
-print("\nMarket signals head:\n", market.head())
-
-
-# In[10]:
-
-
-def recommend_jobs(user_skills, tfidf, postings_df, top_n=5):
-    user_vec = tfidf.transform([" ".join(user_skills)])
-    sims = cosine_similarity(user_vec, tfidf_matrix)[0]
-    postings_df["similarity"] = sims
-    return postings_df.sort_values("similarity", ascending=False).head(top_n)[["job_title","similarity"]]
-
-print("\nSample Recommendations:")
-print(recommend_jobs(["python","data analysis","machine learning"], tfidf, postings_df))
-
-
-# In[11]:
-
-
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-# Assuming postings_df is already loaded and has a 'description' column
-docs = postings_df["description"].fillna("").tolist()
-
-tfidf = TfidfVectorizer(
-    max_features=5000,
-    ngram_range=(1, 2),
-    stop_words="english",
-    min_df=2,
-    max_df=0.85,
-    sublinear_tf=True
-)
-
-tfidf_matrix = tfidf.fit_transform(docs)
-print("TF-IDF matrix shape:", tfidf_matrix.shape)
-
-
-# In[ ]:
-
-
-
-
+    return (
+        result.sort_values("similarity", ascending=False)
+        .head(top_n)[["job_title", "similarity"]]
+        .reset_index(drop=True)
+    )

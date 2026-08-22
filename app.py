@@ -1,54 +1,48 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[4]:
-
-
 import streamlit as st
 import pandas as pd
 
-# Import your pipeline classes from CareerClassifier.py
-from CareerClassifier import RecommendationEngine, DataLoader, FeatureEngineer, HybridModel, Visualizer
+from CareerClassifier import load_pipeline, recommend_jobs
+
+st.set_page_config(page_title="Career Recommendation System", layout="wide")
 
 st.title("Career Recommendation System")
+st.write("Find relevant job postings based on your skills.")
 
-# Upload dataset
-uploaded_file = st.file_uploader("Upload job postings CSV", type="csv")
-if uploaded_file is not None:
-    postings_df = pd.read_csv(uploaded_file)
+@st.cache_resource(show_spinner="Loading career recommendation engine...")
+def get_pipeline():
+    return load_pipeline()
 
-    # Expandable table to preview data
-    with st.expander("View Job Postings Data"):
-        st.dataframe(postings_df.head(20))
+try:
+    pipeline = get_pipeline()
+except Exception as e:
+    st.error("The recommendation engine could not start.")
+    st.exception(e)
+    st.stop()
 
-    # Skill selection widget
-    user_skills = st.multiselect(
-        "Select your skills:",
-        ["Python", "SQL", "Machine Learning", "Excel", "Data Visualization"]
-    )
+postings_df = pipeline["postings_df"]
 
-    if st.button("Get Recommendations"):
-        # Initialize pipeline
-        engine = RecommendationEngine()
-        feature_engineer = FeatureEngineer()
-        hybrid_model = HybridModel()
+st.success(f"Loaded {len(postings_df):,} job postings.")
 
-        # Example: preprocess + recommend
-        features = feature_engineer.transform(postings_df)
-        recommendations = engine.recommend(user_skills, features, hybrid_model)
+with st.expander("View Job Postings Data"):
+    st.dataframe(postings_df.head(20), use_container_width=True)
 
-        st.write("Top Recommendations:")
-        st.dataframe(recommendations)
+user_skills = st.multiselect(
+    "Select your skills:",
+    ["Python", "SQL", "Machine Learning", "Excel", "Data Visualization",
+     "Statistics", "Data Analysis", "Power BI", "R", "Deep Learning"]
+)
 
+if st.button("Get Recommendations", type="primary"):
+    if not user_skills:
+        st.warning("Please select at least one skill.")
+    else:
+        recommendations = recommend_jobs(
+            user_skills=user_skills,
+            tfidf=pipeline["tfidf"],
+            tfidf_matrix=pipeline["tfidf_matrix"],
+            postings_df=postings_df,
+            top_n=5,
+        )
 
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
+        st.subheader("Top Recommendations")
+        st.dataframe(recommendations, use_container_width=True)
