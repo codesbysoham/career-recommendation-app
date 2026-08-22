@@ -1,4 +1,4 @@
-# Career Recommendation backend for Streamlit
+# Career Recommendation & Job Market Analytics backend
 import os
 import zipfile
 
@@ -14,9 +14,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 POSTINGS_PATH = "data/postings.csv"
 KAGGLE_DATASET = "soham1510/career-postings-dataset"
 
+SKILLS_PATH = "data/Skills.xlsx"
+KNOWLEDGE_PATH = "data/Knowledge.xlsx"
+OCCUPATIONS_PATH = "data/Occupation Data.xlsx"
+
 
 def _download_postings():
-    """Download postings.csv from Kaggle if it is not already present."""
+    """Download postings.csv from Kaggle only when it is not already present."""
     if os.path.exists(POSTINGS_PATH):
         return
 
@@ -42,61 +46,83 @@ def _download_postings():
         os.remove(zip_path)
 
 
-@st.cache_resource(show_spinner="Loading career recommendation engine...")
-def load_pipeline():
-    """
-    Load postings and build the TF-IDF recommendation model once.
+@st.cache_data(show_spinner="Loading O*NET datasets...")
+def load_onet_data():
+    skills = pd.read_excel(SKILLS_PATH)
+    knowledge = pd.read_excel(KNOWLEDGE_PATH)
+    occupations = pd.read_excel(OCCUPATIONS_PATH)
 
-    Everything is kept inside one cached resource so Streamlit does not
-    repeatedly create large DataFrame/TF-IDF objects on reruns.
-    """
+    # Keep only the columns needed by the dashboard.
+    skills = skills[
+        [
+            "O*NET-SOC Code",
+            "Title",
+            "Element Name",
+            "Scale ID",
+            "Data Value",
+        ]
+    ].copy()
+
+    knowledge = knowledge[
+        [
+            "O*NET-SOC Code",
+            "Title",
+            "Element Name",
+            "Scale ID",
+            "Data Value",
+        ]
+    ].copy()
+
+    return skills, knowledge, occupations
+
+
+@st.cache_resource(show_spinner="Loading job market data and building model...")
+def load_pipeline():
+    """Load postings, O*NET data and build a lightweight TF-IDF model."""
     _download_postings()
 
-    postings_df = pd.read_csv(POSTINGS_PATH, low_memory=False)
+    postings = pd.read_csv(POSTINGS_PATH, low_memory=False)
 
-    # Detect the relevant columns without depending on exact capitalization.
-    title_col = next(
-        (c for c in postings_df.columns if "title" in c.lower()),
-        None,
-    )
-    desc_col = next(
-        (c for c in postings_df.columns if "descrip" in c.lower()),
-        None,
-    )
-    sal_col = next(
-        (
-            c for c in postings_df.columns
-            if "max_sal" in c.lower() or "salary" in c.lower()
-        ),
-        None,
-    )
-    loc_col = next(
-        (c for c in postings_df.columns if "location" in c.lower()),
-        None,
-    )
+    # Standardize a few fields used throughout the app.
+    for col in ["title", "company_name", "location", "description"]:
+        if col not in postings.columns:
+            postings[col] = ""
 
-    rename = {}
-    if title_col:
-        rename[title_col] = "job_title"
-    if desc_col:
-        rename[desc_col] = "description"
-    if sal_col:
-        rename[sal_col] = "max_salary"
-    if loc_col:
-        rename[loc_col] = "location"
+    for col in ["max_salary", "med_salary", "min_salary",
+                "normalized_salary", "views", "applies"]:
+        if col not in postings.columns:
+            postings[col] = np.nan
 
-    postings_df.rename(columns=rename, inplace=True)
+    postings["title"] = postings["title"].fillna("Unknown").astype(str)
+    postings["company_name"] = postings["company_name"].fillna("Unknown").astype(str)
+    postings["location"] = postings["location"].fillna("Unknown").astype(str)
+    postings["description"] = postings["description"].fillna("").astype(str)
 
-    if "job_title" not in postings_df.columns:
-        postings_df["job_title"] = "Unknown"
+    # Numeric fields.
+    for col in ["max_salary", "med_salary", "min_salary",
+                "normalized_salary", "views", "applies"]:
+        postings[col] = pd.to_numeric(postings[col], errors="coerce")
 
-    if "description" not in postings_df.columns:
-        postings_df["description"] = ""
+    if "remote_allowed" in postings.columns:
+        postings["remote_label"] = postings["remote_allowed"].map(
+            {1: "Remote", 0: "Not Remote"}
+        ).fillna("Unknown")
+    else:
+        postings["remote_label"] = "Unknown"
 
-    postings_df["job_title"] = postings_df["job_title"].fillna("Unknown")
-    postings_df["description"] = postings_df["description"].fillna("")
+    if "listed_time" in postings.columns:
+        postings["listed_date"] = pd.to_datetime(
+            postings["listed_time"], errors="coerce", unit="ms"
+        )
+        # If the source is already datetime-like, retry without a unit.
+        if postings["listed_date"].notna().sum() == 0:
+            postings["listed_date"] = pd.to_datetime(
+                postings["listed_time"], errors="coerce"
+            )
+    else:
+        postings["listed_date"] = pd.NaT
 
-    # Lightweight TF-IDF suitable for Streamlit Cloud.
+    # Lightweight TF-IDF for career/job matching.
     tfidf = TfidfVectorizer(
         max_features=3000,
         ngram_range=(1, 1),
@@ -107,9 +133,104 @@ def load_pipeline():
         dtype=np.float32,
     )
 
-    tfidf_matrix = tfidf.fit_transform(postings_df["description"])
+    tfidf_matrix = tfidf.fit_transform(postings["description"])
 
-    return postings_df, tfidf, tfidf_matrix
+    skills, knowledge, occupations = load_onet_data()
+
+    return postings, tfidf, tfidf_matrix, skills, knowledge, occupations
+
+
+def get_skill_options(skills_df):
+    """Return the real O*NET skill names from Skills.xlsx."""
+    return sorted(
+        skills_df["Element Name"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+
+@st.cache_data
+def get_skill_profile(skills_df):
+    """Build occupation × skill importance/level tables from O*NET Skills."""
+    skills = skills_df.copy()
+
+    importance = (
+        skills[skills["Scale ID"] == "IM"]
+        .pivot_table(
+            index=["O*NET-SOC Code", "Title"],
+            columns="Element Name",
+            values="Data Value",
+            aggfunc="mean",
+        )
+        .fillna(0)
+    )
+
+    level = (
+        skills[skills["Scale ID"] == "LV"]
+        .pivot_table(
+            index=["O*NET-SOC Code", "Title"],
+            columns="Element Name",
+            values="Data Value",
+            aggfunc="mean",
+        )
+        .fillna(0)
+    )
+
+    return importance, level
+
+
+def career_match(selected_skills, skills_df, top_n=10):
+    """Rank occupations using the O*NET importance values of selected skills."""
+    importance, _ = get_skill_profile(skills_df)
+
+    selected = [s for s in selected_skills if s in importance.columns]
+    if not selected:
+        return pd.DataFrame()
+
+    # Average selected-skill importance, normalized to a 0–100 score.
+    raw = importance[selected].mean(axis=1)
+    score = (raw / 5.0 * 100).clip(0, 100)
+
+    result = pd.DataFrame({
+        "O*NET-SOC Code": importance.index.get_level_values(0),
+        "Career": importance.index.get_level_values(1),
+        "Match Score": score.values,
+        "Skills Matched": (importance[selected] > 0).sum(axis=1).values,
+    })
+
+    return (
+        result.sort_values(
+            ["Match Score", "Skills Matched"],
+            ascending=False,
+        )
+        .head(top_n)
+        .reset_index(drop=True)
+    )
+
+
+def get_skill_gaps(occupation_title, selected_skills, skills_df, top_n=10):
+    """Show the most important skills for an occupation and selected-skill gaps."""
+    importance, _ = get_skill_profile(skills_df)
+
+    rows = importance.reset_index()
+    rows = rows[rows["Title"] == occupation_title]
+
+    if rows.empty:
+        return pd.DataFrame()
+
+    row = rows.iloc[0]
+    skill_columns = [c for c in importance.columns]
+    values = pd.DataFrame({
+        "Skill": skill_columns,
+        "Importance": [row.get(c, 0) for c in skill_columns],
+    })
+
+    values["Selected"] = values["Skill"].isin(selected_skills)
+    values = values.sort_values("Importance", ascending=False).head(top_n)
+
+    return values.reset_index(drop=True)
 
 
 def recommend_jobs(
@@ -117,21 +238,92 @@ def recommend_jobs(
     tfidf,
     tfidf_matrix,
     postings_df,
-    top_n=5,
+    top_n=10,
 ):
-    """Return the top job postings matching the selected skills."""
+    """Recommend real postings using TF-IDF similarity."""
     user_text = " ".join(user_skills)
-
     user_vector = tfidf.transform([user_text])
     similarities = cosine_similarity(user_vector, tfidf_matrix)[0]
 
-    # Avoid modifying the cached DataFrame.
-    result = postings_df[["job_title"]].copy()
-    result["similarity"] = similarities
+    result = postings_df[
+        [
+            c for c in [
+                "title",
+                "company_name",
+                "location",
+                "formatted_work_type",
+                "formatted_experience_level",
+                "remote_label",
+                "normalized_salary",
+                "job_posting_url",
+            ]
+            if c in postings_df.columns
+        ]
+    ].copy()
+
+    result["Match Score"] = similarities * 100
 
     return (
-        result
-        .sort_values("similarity", ascending=False)
+        result.sort_values("Match Score", ascending=False)
         .head(top_n)
         .reset_index(drop=True)
     )
+
+
+def filter_jobs(
+    postings,
+    title=None,
+    location=None,
+    work_type=None,
+    experience=None,
+    remote=None,
+    min_salary=None,
+):
+    """Filter the job-posting table for the Job Explorer page."""
+    df = postings
+
+    if title and title != "All":
+        mask = df["title"].str.contains(title, case=False, na=False)
+        df = df[mask]
+
+    if location and location != "All":
+        mask = df["location"].str.contains(location, case=False, na=False)
+        df = df[mask]
+
+    if work_type and work_type != "All" and "formatted_work_type" in df:
+        df = df[df["formatted_work_type"].fillna("Unknown") == work_type]
+
+    if experience and experience != "All" and "formatted_experience_level" in df:
+        df = df[
+            df["formatted_experience_level"].fillna("Unknown") == experience
+        ]
+
+    if remote and remote != "All":
+        df = df[df["remote_label"] == remote]
+
+    if min_salary is not None:
+        df = df[df["normalized_salary"].fillna(0) >= min_salary]
+
+    return df
+
+
+def top_counts(series, n=10):
+    return series.fillna("Unknown").astype(str).value_counts().head(n)
+
+
+def dashboard_metrics(postings):
+    """Calculate high-level market KPIs."""
+    total = len(postings)
+    companies = postings["company_name"].replace("Unknown", np.nan).nunique()
+    titles = postings["title"].replace("Unknown", np.nan).nunique()
+
+    remote = (
+        (postings["remote_label"] == "Remote").sum()
+        if "remote_label" in postings
+        else 0
+    )
+
+    salary = postings["normalized_salary"].dropna()
+    median_salary = salary.median() if not salary.empty else np.nan
+
+    return total, companies, titles, remote, median_salary
