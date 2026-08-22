@@ -5,13 +5,37 @@
 
 
 # Core libraries
+# Core libraries
 import os
-import pandas as pd
-import numpy as np
+import re
+import warnings
 import zipfile
+
+import numpy as np
+import pandas as pd
+
+# Visualization
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Streamlit
 import streamlit as st
+
+# Kaggle
 from kaggle.api.kaggle_api_extended import KaggleApi
 
+# ML + Stats
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.decomposition import PCA
+from scipy.cluster.hierarchy import dendrogram, linkage
+
+warnings.filterwarnings("ignore")
+
+sns.set_theme(style="whitegrid", font_scale=1.05)
+plt.rcParams.update({"figure.dpi": 150})
 
 # Excel files stored in GitHub
 DATA_PATHS = {
