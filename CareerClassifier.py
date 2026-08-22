@@ -1,7 +1,6 @@
-# Career recommendation backend
+# Career Recommendation backend for Streamlit
 import os
 import zipfile
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -11,20 +10,13 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-warnings.filterwarnings("ignore")
-
-DATA_PATHS = {
-    "skills": "data/Skills.xlsx",
-    "knowledge": "data/Knowledge.xlsx",
-    "occupations": "data/Occupation Data.xlsx",
-}
 
 POSTINGS_PATH = "data/postings.csv"
 KAGGLE_DATASET = "soham1510/career-postings-dataset"
 
 
-def download_postings():
-    """Download postings.csv from Kaggle only when it is not already present."""
+def _download_postings():
+    """Download postings.csv from Kaggle if it is not already present."""
     if os.path.exists(POSTINGS_PATH):
         return
 
@@ -44,31 +36,25 @@ def download_postings():
     )
 
     zip_path = "data/postings.csv.zip"
-
     if os.path.exists(zip_path):
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall("data")
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall("data")
         os.remove(zip_path)
 
 
-@st.cache_data(show_spinner="Loading datasets...")
-def load_data():
-    """Load the Excel files from GitHub and postings.csv from Kaggle."""
-    download_postings()
+@st.cache_resource(show_spinner="Loading career recommendation engine...")
+def load_pipeline():
+    """
+    Load postings and build the TF-IDF recommendation model once.
 
-    skills_df = pd.read_excel(DATA_PATHS["skills"])
-    knowledge_df = pd.read_excel(DATA_PATHS["knowledge"])
-    occupations_df = pd.read_excel(DATA_PATHS["occupations"])
+    Everything is kept inside one cached resource so Streamlit does not
+    repeatedly create large DataFrame/TF-IDF objects on reruns.
+    """
+    _download_postings()
+
     postings_df = pd.read_csv(POSTINGS_PATH, low_memory=False)
 
-    return skills_df, knowledge_df, occupations_df, postings_df
-
-
-@st.cache_resource(show_spinner="Building recommendation model...")
-def build_model(postings_df):
-    """Build the TF-IDF model once and cache it."""
-    postings_df = postings_df.copy()
-
+    # Detect the relevant columns without depending on exact capitalization.
     title_col = next(
         (c for c in postings_df.columns if "title" in c.lower()),
         None,
@@ -90,7 +76,6 @@ def build_model(postings_df):
     )
 
     rename = {}
-
     if title_col:
         rename[title_col] = "job_title"
     if desc_col:
@@ -108,19 +93,18 @@ def build_model(postings_df):
     if "description" not in postings_df.columns:
         postings_df["description"] = ""
 
-    if "max_salary" not in postings_df.columns:
-        postings_df["max_salary"] = np.nan
-
     postings_df["job_title"] = postings_df["job_title"].fillna("Unknown")
     postings_df["description"] = postings_df["description"].fillna("")
 
+    # Lightweight TF-IDF suitable for Streamlit Cloud.
     tfidf = TfidfVectorizer(
-        max_features=5000,
-        ngram_range=(1, 2),
+        max_features=3000,
+        ngram_range=(1, 1),
         stop_words="english",
-        min_df=2,
+        min_df=3,
         max_df=0.85,
         sublinear_tf=True,
+        dtype=np.float32,
     )
 
     tfidf_matrix = tfidf.fit_transform(postings_df["description"])
@@ -128,34 +112,26 @@ def build_model(postings_df):
     return postings_df, tfidf, tfidf_matrix
 
 
-def load_pipeline():
-    """Load all data and build the cached recommendation model."""
-    skills_df, knowledge_df, occupations_df, raw_postings = load_data()
-
-    postings_df, tfidf, tfidf_matrix = build_model(raw_postings)
-
-    return {
-        "skills_df": skills_df,
-        "knowledge_df": knowledge_df,
-        "occupations_df": occupations_df,
-        "postings_df": postings_df,
-        "tfidf": tfidf,
-        "tfidf_matrix": tfidf_matrix,
-    }
-
-
-def recommend_jobs(user_skills, tfidf, tfidf_matrix, postings_df, top_n=5):
+def recommend_jobs(
+    user_skills,
+    tfidf,
+    tfidf_matrix,
+    postings_df,
+    top_n=5,
+):
     """Return the top job postings matching the selected skills."""
     user_text = " ".join(user_skills)
 
-    user_vec = tfidf.transform([user_text])
-    similarities = cosine_similarity(user_vec, tfidf_matrix)[0]
+    user_vector = tfidf.transform([user_text])
+    similarities = cosine_similarity(user_vector, tfidf_matrix)[0]
 
-    result = postings_df.copy()
+    # Avoid modifying the cached DataFrame.
+    result = postings_df[["job_title"]].copy()
     result["similarity"] = similarities
 
     return (
-        result.sort_values("similarity", ascending=False)
-        .head(top_n)[["job_title", "similarity"]]
+        result
+        .sort_values("similarity", ascending=False)
+        .head(top_n)
         .reset_index(drop=True)
     )
