@@ -6,6 +6,8 @@
 
 # Core libraries
 import os
+import pandas as pd
+import numpy as np
 import zipfile
 import streamlit as st
 from kaggle.api.kaggle_api_extended import KaggleApi
