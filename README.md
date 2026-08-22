@@ -1,6 +1,4 @@
 # career-recommendation-app
-# Career Recommendation App
-
 Career Recommendation System built with **Streamlit** and **machine learning**.  
 It helps users match their skills to job postings and explore career paths interactively.
 
