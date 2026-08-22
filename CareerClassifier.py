@@ -5,42 +5,64 @@
 
 
 # Core libraries
-import os, re, warnings
-import numpy as np
-import pandas as pd
-
-# Visualization
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-# ML + Stats
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.decomposition import PCA
-from scipy.cluster.hierarchy import dendrogram, linkage
-
-warnings.filterwarnings("ignore")
-
-sns.set_theme(style="whitegrid", font_scale=1.05)
-plt.rcParams.update({"figure.dpi": 150})
+import os
+import zipfile
+import streamlit as st
+from kaggle.api.kaggle_api_extended import KaggleApi
 
 
-# In[2]:
-
-
+# Excel files stored in GitHub
 DATA_PATHS = {
-    "skills":       r"C:\Users\BIT\Downloads\Skills.xlsx",
-    "knowledge":    r"C:\Users\BIT\Downloads\Knowledge.xlsx",
-    "occupations":  r"C:\Users\BIT\Downloads\Occupation Data.xlsx",
-    "postings":     r"C:\Users\BIT\Downloads\jobpostings.csv\postings.csv",
+    "skills": "data/Skills.xlsx",
+    "knowledge": "data/Knowledge.xlsx",
+    "occupations": "data/Occupation Data.xlsx",
 }
 
+POSTINGS_PATH = "data/postings.csv"
+
+
+# =========================
+# DOWNLOAD POSTINGS FROM KAGGLE
+# =========================
+
+if not os.path.exists(POSTINGS_PATH):
+
+    os.environ["KAGGLE_USERNAME"] = st.secrets["kaggle_username"]
+    os.environ["KAGGLE_KEY"] = st.secrets["kaggle_key"]
+
+    api = KaggleApi()
+    api.authenticate()
+
+    api.dataset_download_file(
+        "soham1510/career-postings-dataset",
+        "postings.csv",
+        path="data",
+        force=True
+    )
+
+    # Kaggle may download the file as postings.csv.zip
+    if os.path.exists("data/postings.csv.zip"):
+
+        with zipfile.ZipFile("data/postings.csv.zip", "r") as zip_ref:
+            zip_ref.extractall("data")
+
+        os.remove("data/postings.csv.zip")
+
+
+# =========================
+# LOAD DATA
+# =========================
+
 skills_df = pd.read_excel(DATA_PATHS["skills"])
+
 knowledge_df = pd.read_excel(DATA_PATHS["knowledge"])
+
 occupations_df = pd.read_excel(DATA_PATHS["occupations"])
-postings_df = pd.read_csv(DATA_PATHS["postings"], low_memory=False)
+
+postings_df = pd.read_csv(
+    POSTINGS_PATH,
+    low_memory=False
+)
 
 
 # In[3]:
