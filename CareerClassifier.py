@@ -191,9 +191,6 @@ print(recommend_jobs(["python","data analysis","machine learning"], tfidf, posti
 
 
 from sklearn.feature_extraction.text import TfidfVectorizer
-postings_df = pd.read_csv(r"C:\Users\BIT\Downloads\jobpostings.csv\postings.csv", low_memory=False)
-print(postings_df.head())
-
 
 # Assuming postings_df is already loaded and has a 'description' column
 docs = postings_df["description"].fillna("").tolist()
