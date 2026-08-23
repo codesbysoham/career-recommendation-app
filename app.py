@@ -24,8 +24,8 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-# Load only the small O*NET files at startup. The 123k job dataset and TF-IDF
-# model are deliberately deferred until a page actually needs them.
+# Startup deliberately loads only the small O*NET files. The 123k job dataset
+# and TF-IDF model are loaded only after the user asks for job-market features.
 skills_df, knowledge_df, occupations_df, software_df = load_onet_data()
 
 @st.cache_data(show_spinner="Building skill library...")
@@ -35,14 +35,6 @@ def get_base_skill_master():
 
 skill_master = get_base_skill_master()
 
-
-def get_market_data():
-    return load_postings()
-
-
-def get_market_skill_master(postings):
-    return build_skill_master(skills_df, software_df, postings)
-
 page = st.sidebar.radio(
     "Navigate",
     ["📊 Market Dashboard", "🎯 Career Matcher", "🧩 Skill Gap Analyzer", "🔎 Job Explorer"],
@@ -50,47 +42,50 @@ page = st.sidebar.radio(
 
 if page == "📊 Market Dashboard":
     st.header("Job Market Overview")
-    postings = get_market_data()
-    total, companies, titles, remote, median_salary = dashboard_metrics(postings)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Job Postings", f"{total:,}")
-    c2.metric("Companies", f"{companies:,}")
-    c3.metric("Unique Titles", f"{titles:,}")
-    c4.metric("Remote Jobs", f"{remote:,}")
-    c5.metric("Median Salary", f"${median_salary:,.0f}" if pd.notna(median_salary) else "N/A")
+    st.info("The 123,849-posting market dataset is loaded only when you request the dashboard.")
+    if st.button("Load Market Dashboard", type="primary"):
+        with st.spinner("Loading job-market data..."):
+            postings = load_postings()
+        total, companies, titles, remote, median_salary = dashboard_metrics(postings)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Job Postings", f"{total:,}")
+        c2.metric("Companies", f"{companies:,}")
+        c3.metric("Unique Titles", f"{titles:,}")
+        c4.metric("Remote Jobs", f"{remote:,}")
+        c5.metric("Median Salary", f"${median_salary:,.0f}" if pd.notna(median_salary) else "N/A")
 
-    st.divider()
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Top Job Titles")
-        st.bar_chart(top_counts(postings["title"], 10), width="stretch")
-    with right:
-        st.subheader("Top Locations")
-        st.bar_chart(top_counts(postings["location"], 10), width="stretch")
+        st.divider()
+        left, right = st.columns(2)
+        with left:
+            st.subheader("Top Job Titles")
+            st.bar_chart(top_counts(postings["title"], 10), width="stretch")
+        with right:
+            st.subheader("Top Locations")
+            st.bar_chart(top_counts(postings["location"], 10), width="stretch")
 
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Work Type")
-        if "formatted_work_type" in postings:
-            st.bar_chart(postings["formatted_work_type"].fillna("Unknown").value_counts().head(10), width="stretch")
-    with right:
-        st.subheader("Experience Level")
-        if "formatted_experience_level" in postings:
-            st.bar_chart(postings["formatted_experience_level"].fillna("Unknown").value_counts().head(10), width="stretch")
+        left, right = st.columns(2)
+        with left:
+            st.subheader("Work Type")
+            if "formatted_work_type" in postings:
+                st.bar_chart(postings["formatted_work_type"].fillna("Unknown").value_counts().head(10), width="stretch")
+        with right:
+            st.subheader("Experience Level")
+            if "formatted_experience_level" in postings:
+                st.bar_chart(postings["formatted_experience_level"].fillna("Unknown").value_counts().head(10), width="stretch")
 
-    st.subheader("Top Unified Skills")
-    market_skills = get_market_skill_master(postings)
-    top_skills = market_skills.head(20).set_index("skill")["market_frequency"]
-    if top_skills.sum() > 0:
-        st.bar_chart(top_skills, width="stretch")
-    else:
-        st.info("No job-market skill frequency was detected yet.")
+        st.subheader("Top Unified Skills")
+        with st.spinner("Calculating market skill demand..."):
+            market_skills = build_skill_master(skills_df, software_df, postings)
+        top_skills = market_skills.head(20).set_index("skill")["market_frequency"]
+        if top_skills.sum() > 0:
+            st.bar_chart(top_skills, width="stretch")
+        else:
+            st.info("No job-market skill frequency was detected yet.")
 
 elif page == "🎯 Career Matcher":
     st.header("🎯 Career Matcher")
     st.write("Choose from one unified skill library containing O*NET skills, O*NET workplace technologies, and controlled job-market evidence.")
-    skill_options = skill_master["skill"].tolist()
-    selected = st.multiselect("What skills do you have?", skill_options, placeholder="Search Python, SQL, Excel, Power BI, Critical Thinking...")
+    selected = st.multiselect("What skills do you have?", skill_master["skill"].tolist(), placeholder="Search Python, SQL, Excel, Power BI, Critical Thinking...")
 
     if selected:
         meta = skill_master[skill_master["skill"].isin(selected)]
@@ -127,7 +122,7 @@ elif page == "🧩 Skill Gap Analyzer":
         st.info("Select one or more skills to get personalized recommendations.")
     else:
         with st.spinner("Loading job-market evidence..."):
-            postings = get_market_data()
+            postings = load_postings()
         gaps = get_occupation_skill_gaps(
             soc_code=soc_code,
             selected_skills=selected,
@@ -160,7 +155,8 @@ elif page == "🧩 Skill Gap Analyzer":
 
 else:
     st.header("🔎 Job Explorer")
-    postings = get_market_data()
+    with st.spinner("Loading job-market data..."):
+        postings = load_postings()
     col1, col2 = st.columns(2)
     with col1:
         title_search = st.text_input("Job title contains", placeholder="e.g. Data Scientist")
