@@ -1,5 +1,3 @@
-import os
-
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -10,9 +8,7 @@ from CareerClassifier import _download_postings
 POSTINGS_PATH = "data/postings.csv"
 
 
-@st.cache_resource(show_spinner="Loading job market and ML model...")
-def load_job_engine():
-    """Load the large job dataset and TF-IDF only when a job-market feature is used."""
+def _prepare_postings():
     _download_postings()
     postings = pd.read_csv(POSTINGS_PATH, low_memory=False)
 
@@ -27,14 +23,7 @@ def load_job_engine():
         if col not in postings.columns:
             postings[col] = default
 
-    for col in [
-        "max_salary",
-        "med_salary",
-        "min_salary",
-        "normalized_salary",
-        "views",
-        "applies",
-    ]:
+    for col in ["max_salary", "med_salary", "min_salary", "normalized_salary", "views", "applies"]:
         if col not in postings.columns:
             postings[col] = np.nan
         postings[col] = pd.to_numeric(postings[col], errors="coerce")
@@ -43,12 +32,23 @@ def load_job_engine():
         postings[col] = postings[col].fillna("").astype(str)
 
     if "remote_allowed" in postings.columns:
-        postings["remote_label"] = postings["remote_allowed"].map(
-            {1: "Remote", 0: "Not Remote"}
-        ).fillna("Unknown")
+        postings["remote_label"] = postings["remote_allowed"].map({1: "Remote", 0: "Not Remote"}).fillna("Unknown")
     else:
         postings["remote_label"] = "Unknown"
 
+    return postings
+
+
+@st.cache_data(show_spinner="Loading job-market data...")
+def load_postings():
+    """Load the 123k job postings without building the TF-IDF model."""
+    return _prepare_postings()
+
+
+@st.cache_resource(show_spinner="Loading job market and ML model...")
+def load_job_engine():
+    """Load postings plus TF-IDF only for recommendation features."""
+    postings = _prepare_postings()
     model_text = postings["title"] + " " + postings["description"]
     tfidf = TfidfVectorizer(
         max_features=5000,
