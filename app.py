@@ -2,11 +2,11 @@ import pandas as pd
 import streamlit as st
 
 from CareerClassifier import (
+    build_skill_master,
     career_match,
     dashboard_metrics,
     filter_jobs,
     get_skill_gaps,
-    get_skill_options,
     load_pipeline,
     recommend_jobs,
     top_counts,
@@ -22,10 +22,6 @@ st.set_page_config(
 st.title("💼 Career Intelligence Dashboard")
 st.caption("Job-market analytics, career matching and skill-gap analysis.")
 
-
-# -----------------------------
-# Load the cached backend once
-# -----------------------------
 try:
     (
         postings,
@@ -34,16 +30,20 @@ try:
         skills_df,
         knowledge_df,
         occupations_df,
+        software_df,
     ) = load_pipeline()
+
+    skill_master = build_skill_master(
+        skills_df,
+        software_df,
+        postings,
+    )
 except Exception as e:
     st.error("The recommendation engine could not start.")
     st.exception(e)
     st.stop()
 
 
-# -----------------------------
-# Sidebar navigation
-# -----------------------------
 page = st.sidebar.radio(
     "Navigate",
     [
@@ -54,24 +54,23 @@ page = st.sidebar.radio(
     ],
 )
 
-skill_options = get_skill_options(skills_df)
+# One unified searchable skill list.
+# Sort by market evidence first, then O*NET technology signals.
+skill_options = skill_master["skill"].tolist()
 
 
 # ============================================================
-# 1. MARKET DASHBOARD
+# MARKET DASHBOARD
 # ============================================================
 if page == "📊 Market Dashboard":
-
     st.header("Job Market Overview")
-    st.write("Explore the structure of the job market represented by the dataset.")
 
     total, companies, titles, remote, median_salary = dashboard_metrics(postings)
 
     c1, c2, c3, c4, c5 = st.columns(5)
-
     c1.metric("Job Postings", f"{total:,}")
     c2.metric("Companies", f"{companies:,}")
-    c3.metric("Unique Job Titles", f"{titles:,}")
+    c3.metric("Unique Titles", f"{titles:,}")
     c4.metric("Remote Jobs", f"{remote:,}")
     c5.metric(
         "Median Salary",
@@ -84,15 +83,11 @@ if page == "📊 Market Dashboard":
 
     with left:
         st.subheader("Top Job Titles")
-        title_counts = top_counts(postings["title"], 10)
-        st.bar_chart(title_counts)
+        st.bar_chart(top_counts(postings["title"], 10))
 
     with right:
         st.subheader("Top Locations")
-        location_counts = top_counts(postings["location"], 10)
-        st.bar_chart(location_counts)
-
-    st.divider()
+        st.bar_chart(top_counts(postings["location"], 10))
 
     left, right = st.columns(2)
 
@@ -116,83 +111,93 @@ if page == "📊 Market Dashboard":
                 .head(10)
             )
 
-    st.subheader("Most Visible Job Titles")
-    if "views" in postings.columns:
-        views = (
-            postings.groupby("title", dropna=False)["views"]
-            .sum()
-            .sort_values(ascending=False)
-            .head(10)
-        )
-        st.bar_chart(views)
+    st.subheader("Top Unified Skills")
+    top_skills = skill_master.head(20).set_index("skill")["market_frequency"]
+    st.bar_chart(top_skills)
 
 
 # ============================================================
-# 2. CAREER MATCHER
+# CAREER MATCHER
 # ============================================================
 elif page == "🎯 Career Matcher":
-
     st.header("🎯 Career Matcher")
     st.write(
-        "Select skills from the actual O*NET Skills dataset and find "
-        "occupations whose skill profiles best match them."
+        "Select from one unified skill library. It combines O*NET skills, "
+        "O*NET workplace software examples, and validated skill evidence "
+        "from the job-posting data."
     )
 
-    selected_skills = st.multiselect(
+    selected = st.multiselect(
         "What skills do you have?",
         skill_options,
-        placeholder="Search and select skills...",
+        placeholder="Search Python, SQL, Excel, Power BI, Critical Thinking...",
     )
 
-    if selected_skills:
-        st.caption(f"{len(selected_skills)} skills selected")
+    if selected:
+        meta = skill_master[skill_master["skill"].isin(selected)].copy()
 
-        match = career_match(
-            selected_skills,
+        st.caption(f"{len(selected)} skills selected")
+
+        with st.expander("Skill evidence"):
+            st.dataframe(
+                meta[
+                    [
+                        "skill",
+                        "source",
+                        "market_frequency",
+                        "hot_technology",
+                        "in_demand",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # O*NET career matching where selected skills map to O*NET's
+        # general skill dimensions.
+        matches = career_match(
+            selected,
             skills_df,
+            skill_master,
             top_n=10,
         )
 
-        if not match.empty:
-            st.subheader("Best-Matching Careers")
-            st.dataframe(
-                match,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.subheader("Recommended Job Postings")
-
-            recommendations = recommend_jobs(
-                selected_skills,
-                tfidf,
-                tfidf_matrix,
-                postings,
-                top_n=10,
-            )
-
-            st.dataframe(
-                recommendations,
-                use_container_width=True,
-                hide_index=True,
+        if matches.empty:
+            st.info(
+                "These skills are primarily technical/software skills. "
+                "We can still match you to actual job postings below; "
+                "O*NET occupation matching requires an O*NET general-skill mapping."
             )
         else:
-            st.warning("No matching occupations were found.")
+            st.subheader("Best-Matching Careers")
+            st.dataframe(
+                matches,
+                use_container_width=True,
+                hide_index=True,
+            )
 
+        st.subheader("Recommended Job Postings")
+        jobs = recommend_jobs(
+            selected,
+            tfidf,
+            tfidf_matrix,
+            postings,
+            top_n=10,
+        )
+        st.dataframe(
+            jobs,
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
         st.info("Select one or more skills to start.")
 
 
 # ============================================================
-# 3. SKILL GAP ANALYZER
+# SKILL GAP ANALYZER
 # ============================================================
 elif page == "🧩 Skill Gap Analyzer":
-
     st.header("🧩 Skill Gap Analyzer")
-    st.write(
-        "Choose a target occupation and compare its most important O*NET "
-        "skills with the skills you already have."
-    )
 
     occupation_titles = sorted(
         occupations_df["Title"]
@@ -202,27 +207,25 @@ elif page == "🧩 Skill Gap Analyzer":
         .tolist()
     )
 
-    occupation = st.selectbox(
-        "Target career",
-        occupation_titles,
-    )
+    occupation = st.selectbox("Target career", occupation_titles)
 
-    selected_skills = st.multiselect(
+    selected = st.multiselect(
         "Your current skills",
         skill_options,
-        placeholder="Select your current skills...",
+        placeholder="Search your skills...",
     )
 
     gaps = get_skill_gaps(
         occupation,
-        selected_skills,
+        selected,
         skills_df,
         top_n=10,
     )
 
-    if not gaps.empty:
+    if gaps.empty:
+        st.warning("No O*NET skill profile was found for this occupation.")
+    else:
         st.subheader(f"Top Skills for {occupation}")
-
         st.dataframe(
             gaps,
             use_container_width=True,
@@ -230,38 +233,26 @@ elif page == "🧩 Skill Gap Analyzer":
         )
 
         matched = int(gaps["Selected"].sum())
-        total = len(gaps)
-
-        st.metric(
-            "Top-skill coverage",
-            f"{matched}/{total}",
-        )
+        st.metric("Top-skill coverage", f"{matched}/{len(gaps)}")
 
         missing = gaps.loc[~gaps["Selected"], "Skill"].tolist()
-
         if missing:
             st.subheader("Potential Skill Gaps")
             st.write(", ".join(missing))
-        else:
-            st.success("You selected all of the top skills shown.")
 
 
 # ============================================================
-# 4. JOB EXPLORER
+# JOB EXPLORER
 # ============================================================
-elif page == "🔎 Job Explorer":
-
+else:
     st.header("🔎 Job Explorer")
-    st.write("Search and filter the underlying job-posting dataset.")
 
     col1, col2 = st.columns(2)
-
     with col1:
         title_search = st.text_input(
             "Job title contains",
             placeholder="e.g. Data Scientist",
         )
-
     with col2:
         location_search = st.text_input(
             "Location contains",
@@ -272,7 +263,7 @@ elif page == "🔎 Job Explorer":
 
     with col1:
         work_types = ["All"]
-        if "formatted_work_type" in postings.columns:
+        if "formatted_work_type" in postings:
             work_types += sorted(
                 postings["formatted_work_type"]
                 .dropna()
@@ -284,7 +275,7 @@ elif page == "🔎 Job Explorer":
 
     with col2:
         experiences = ["All"]
-        if "formatted_experience_level" in postings.columns:
+        if "formatted_experience_level" in postings:
             experiences += sorted(
                 postings["formatted_experience_level"]
                 .dropna()
@@ -340,5 +331,4 @@ elif page == "🔎 Job Explorer":
         use_container_width=True,
         hide_index=True,
     )
-
     st.caption("Showing up to 200 matching postings.")
