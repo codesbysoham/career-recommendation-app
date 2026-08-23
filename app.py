@@ -22,8 +22,10 @@ st.set_page_config(
 
 st.title("💼 Career Intelligence Dashboard")
 st.caption("Job-market analytics, career matching and skill-gap analysis.")
+st.write("DEBUG 1: app.py started")
 
 try:
+    st.write("DEBUG 2: starting load_pipeline()")
     (
         postings,
         tfidf,
@@ -33,8 +35,10 @@ try:
         occupations_df,
         software_df,
     ) = load_pipeline()
+    st.write("DEBUG 3: load_pipeline() finished")
 
     skill_master = build_skill_master(skills_df, software_df, postings)
+    st.write("DEBUG 4: build_skill_master() finished")
 except Exception as e:
     st.error("The recommendation engine could not start.")
     st.exception(e)
