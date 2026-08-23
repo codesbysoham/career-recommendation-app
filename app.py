@@ -40,6 +40,8 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
+skill_options = skill_master["skill"].tolist()
+
 page = st.sidebar.radio(
     "Navigate",
     [
@@ -49,8 +51,6 @@ page = st.sidebar.radio(
         "🔎 Job Explorer",
     ],
 )
-
-skill_options = skill_master["skill"].tolist()
 
 # ============================================================
 # MARKET DASHBOARD
@@ -76,6 +76,7 @@ if page == "📊 Market Dashboard":
     with left:
         st.subheader("Top Job Titles")
         st.bar_chart(top_counts(postings["title"], 10))
+
     with right:
         st.subheader("Top Locations")
         st.bar_chart(top_counts(postings["location"], 10))
@@ -85,17 +86,28 @@ if page == "📊 Market Dashboard":
         st.subheader("Work Type")
         if "formatted_work_type" in postings:
             st.bar_chart(
-                postings["formatted_work_type"].fillna("Unknown").value_counts().head(10)
+                postings["formatted_work_type"]
+                .fillna("Unknown")
+                .value_counts()
+                .head(10)
             )
+
     with right:
         st.subheader("Experience Level")
         if "formatted_experience_level" in postings:
             st.bar_chart(
-                postings["formatted_experience_level"].fillna("Unknown").value_counts().head(10)
+                postings["formatted_experience_level"]
+                .fillna("Unknown")
+                .value_counts()
+                .head(10)
             )
 
     st.subheader("Top Unified Skills")
-    st.bar_chart(skill_master.head(20).set_index("skill")["market_frequency"])
+    top_skills = skill_master.head(20).set_index("skill")["market_frequency"]
+    if top_skills.sum() > 0:
+        st.bar_chart(top_skills)
+    else:
+        st.info("No job-market skill frequency was detected yet.")
 
 
 # ============================================================
@@ -116,12 +128,21 @@ elif page == "🎯 Career Matcher":
 
     if selected:
         meta = skill_master[skill_master["skill"].isin(selected)]
+
         with st.expander("Skill evidence"):
+            evidence_cols = [
+                c
+                for c in [
+                    "skill",
+                    "source",
+                    "market_frequency",
+                    "hot_technology",
+                    "in_demand",
+                ]
+                if c in meta.columns
+            ]
             st.dataframe(
-                meta[
-                    ["skill", "source", "market_frequency",
-                     "hot_technology", "in_demand"]
-                ],
+                meta[evidence_cols],
                 use_container_width=True,
                 hide_index=True,
             )
@@ -132,7 +153,7 @@ elif page == "🎯 Career Matcher":
             st.dataframe(matches, use_container_width=True, hide_index=True)
         else:
             st.info(
-                "These are mainly technical/software skills. "
+                "No O*NET occupation profile matched the selected skills. "
                 "Use the job recommendations below for direct market matching."
             )
 
@@ -147,7 +168,7 @@ elif page == "🎯 Career Matcher":
 
 
 # ============================================================
-# ML SKILL GAP ANALYZER
+# SKILL GAP ANALYZER
 # ============================================================
 elif page == "🧩 Skill Gap Analyzer":
     st.header("🧩 Skill Gap Analyzer")
@@ -158,12 +179,12 @@ elif page == "🧩 Skill Gap Analyzer":
 
     lookup = occupation_lookup(occupations_df)
 
-    # IMPORTANT: SOC code is the actual key. The visible title is only UI.
     selected_idx = st.selectbox(
         "Target career",
         range(len(lookup)),
         format_func=lambda i: lookup.iloc[i]["Title"],
     )
+
     target = lookup.iloc[selected_idx]
     soc_code = target["O*NET-SOC Code"]
     occupation_title = target["Title"]
@@ -193,21 +214,30 @@ elif page == "🧩 Skill Gap Analyzer":
         )
 
         if gaps.empty:
-            st.warning("No skill recommendations were found for this occupation.")
+            st.warning(
+                "No skill recommendations were found for this occupation."
+            )
         else:
             st.subheader("🎯 Suggested Skills to Consider")
 
             high = gaps[gaps["priority_score"] >= 65]
             medium = gaps[gaps["priority_score"] < 65]
 
+            display_gap_cols = [
+                "skill",
+                "skill_type",
+                "priority_score",
+                "importance",
+                "software_hot",
+                "software_demand",
+                "cooccurrence",
+                "reason",
+            ]
+
             if not high.empty:
                 st.markdown("### 🔴 High Priority")
                 st.dataframe(
-                    high[
-                        ["skill", "skill_type", "priority_score",
-                         "importance", "software_hot",
-                         "software_demand", "cooccurrence", "reason"]
-                    ],
+                    high[display_gap_cols],
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -215,11 +245,7 @@ elif page == "🧩 Skill Gap Analyzer":
             if not medium.empty:
                 st.markdown("### 🟠 Other Relevant Skills")
                 st.dataframe(
-                    medium[
-                        ["skill", "skill_type", "priority_score",
-                         "importance", "software_hot",
-                         "software_demand", "cooccurrence", "reason"]
-                    ],
+                    medium[display_gap_cols],
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -229,16 +255,16 @@ elif page == "🧩 Skill Gap Analyzer":
             with st.expander("How did the model rank these?"):
                 st.markdown(
                     """
-                    **Priority score combines four signals:**
+**Priority score combines four signals:**
 
-                    - **O*NET importance** — how important the skill is to the occupation.
-                    - **Hot Technology** — O*NET employer-market signal.
-                    - **In Demand** — O*NET employer-market signal.
-                    - **Skill co-occurrence** — how often the candidate skill appears
-                      alongside one of your current skills in the job-posting skill data.
+- **O*NET importance** — how important the skill is to the occupation.
+- **Hot Technology** — O*NET employer-market signal.
+- **In Demand** — O*NET employer-market signal.
+- **Skill co-occurrence** — how often the candidate skill appears
+  alongside one of your current skills in the job-posting skill data.
 
-                    The model removes skills you already selected before ranking.
-                    """
+The model removes skills you already selected before ranking.
+"""
                 )
 
             st.subheader("📈 Your Current Profile")
@@ -246,11 +272,20 @@ elif page == "🧩 Skill Gap Analyzer":
                 skill_master["skill"].isin(selected)
             ].copy()
 
+            profile_cols = [
+                c
+                for c in [
+                    "skill",
+                    "source",
+                    "market_frequency",
+                    "hot_technology",
+                    "in_demand",
+                ]
+                if c in selected_df.columns
+            ]
+
             st.dataframe(
-                selected_df[
-                    ["skill", "source", "market_frequency",
-                     "hot_technology", "in_demand"]
-                ],
+                selected_df[profile_cols],
                 use_container_width=True,
                 hide_index=True,
             )
@@ -268,6 +303,7 @@ else:
             "Job title contains",
             placeholder="e.g. Data Scientist",
         )
+
     with col2:
         location_search = st.text_input(
             "Location contains",
@@ -280,7 +316,11 @@ else:
         work_types = ["All"]
         if "formatted_work_type" in postings:
             work_types += sorted(
-                postings["formatted_work_type"].dropna().astype(str).unique().tolist()
+                postings["formatted_work_type"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
             )
         work_type = st.selectbox("Work type", work_types)
 
@@ -288,7 +328,11 @@ else:
         experiences = ["All"]
         if "formatted_experience_level" in postings:
             experiences += sorted(
-                postings["formatted_experience_level"].dropna().astype(str).unique().tolist()
+                postings["formatted_experience_level"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
             )
         experience = st.selectbox("Experience", experiences)
 
@@ -318,12 +362,20 @@ else:
     st.metric("Matching jobs", f"{len(filtered):,}")
 
     display_cols = [
-        c for c in [
-            "title", "company_name", "location",
-            "formatted_work_type", "formatted_experience_level",
-            "remote_label", "normalized_salary", "views",
-            "applies", "job_posting_url"
-        ] if c in filtered.columns
+        c
+        for c in [
+            "title",
+            "company_name",
+            "location",
+            "formatted_work_type",
+            "formatted_experience_level",
+            "remote_label",
+            "normalized_salary",
+            "views",
+            "applies",
+            "job_posting_url",
+        ]
+        if c in filtered.columns
     ]
 
     st.dataframe(
@@ -331,4 +383,5 @@ else:
         use_container_width=True,
         hide_index=True,
     )
+
     st.caption("Showing up to 200 matching postings.")
