@@ -3,10 +3,9 @@ import streamlit as st
 
 st.set_page_config(page_title="Career Intelligence Dashboard", page_icon="💼", layout="wide")
 st.title("💼 Career Intelligence Dashboard")
-st.write("DEBUG A: app.py started before CareerClassifier import")
+st.caption("Job-market analytics, career matching and skill-gap analysis.")
 
 try:
-    st.write("DEBUG B: importing CareerClassifier")
     from CareerClassifier import (
         build_skill_master,
         career_match,
@@ -14,44 +13,44 @@ try:
         filter_jobs,
         get_occupation_skill_gaps,
         get_skill_gap_summary,
-        load_pipeline,
+        load_onet_data,
         recommend_jobs,
         top_counts,
         occupation_lookup,
     )
-    st.write("DEBUG C: CareerClassifier import completed")
-except Exception as e:
-    st.error("CareerClassifier.py failed during import.")
-    st.exception(e)
-    st.stop()
-
-st.caption("Job-market analytics, career matching and skill-gap analysis.")
-st.write("DEBUG D: starting load_pipeline()")
-
-try:
-    (
-        postings,
-        tfidf,
-        tfidf_matrix,
-        skills_df,
-        knowledge_df,
-        occupations_df,
-        software_df,
-    ) = load_pipeline()
-    st.write("DEBUG E: load_pipeline() finished")
-    skill_master = build_skill_master(skills_df, software_df, postings)
-    st.write("DEBUG F: build_skill_master() finished")
+    from JobEngine import load_job_engine, load_postings
 except Exception as e:
     st.error("The recommendation engine could not start.")
     st.exception(e)
     st.stop()
 
-skill_options = skill_master["skill"].tolist()
+# Load only the small O*NET files at startup. The 123k job dataset and TF-IDF
+# model are deliberately deferred until a page actually needs them.
+skills_df, knowledge_df, occupations_df, software_df = load_onet_data()
 
-page = st.sidebar.radio("Navigate", ["📊 Market Dashboard", "🎯 Career Matcher", "🧩 Skill Gap Analyzer", "🔎 Job Explorer"])
+@st.cache_data(show_spinner="Building skill library...")
+def get_base_skill_master():
+    empty_postings = pd.DataFrame(columns=["title", "skills_desc"])
+    return build_skill_master(skills_df, software_df, empty_postings)
+
+skill_master = get_base_skill_master()
+
+
+def get_market_data():
+    return load_postings()
+
+
+def get_market_skill_master(postings):
+    return build_skill_master(skills_df, software_df, postings)
+
+page = st.sidebar.radio(
+    "Navigate",
+    ["📊 Market Dashboard", "🎯 Career Matcher", "🧩 Skill Gap Analyzer", "🔎 Job Explorer"],
+)
 
 if page == "📊 Market Dashboard":
     st.header("Job Market Overview")
+    postings = get_market_data()
     total, companies, titles, remote, median_salary = dashboard_metrics(postings)
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Job Postings", f"{total:,}")
@@ -59,6 +58,7 @@ if page == "📊 Market Dashboard":
     c3.metric("Unique Titles", f"{titles:,}")
     c4.metric("Remote Jobs", f"{remote:,}")
     c5.metric("Median Salary", f"${median_salary:,.0f}" if pd.notna(median_salary) else "N/A")
+
     st.divider()
     left, right = st.columns(2)
     with left:
@@ -67,6 +67,7 @@ if page == "📊 Market Dashboard":
     with right:
         st.subheader("Top Locations")
         st.bar_chart(top_counts(postings["location"], 10), width="stretch")
+
     left, right = st.columns(2)
     with left:
         st.subheader("Work Type")
@@ -76,8 +77,10 @@ if page == "📊 Market Dashboard":
         st.subheader("Experience Level")
         if "formatted_experience_level" in postings:
             st.bar_chart(postings["formatted_experience_level"].fillna("Unknown").value_counts().head(10), width="stretch")
+
     st.subheader("Top Unified Skills")
-    top_skills = skill_master.head(20).set_index("skill")["market_frequency"]
+    market_skills = get_market_skill_master(postings)
+    top_skills = market_skills.head(20).set_index("skill")["market_frequency"]
     if top_skills.sum() > 0:
         st.bar_chart(top_skills, width="stretch")
     else:
@@ -86,18 +89,24 @@ if page == "📊 Market Dashboard":
 elif page == "🎯 Career Matcher":
     st.header("🎯 Career Matcher")
     st.write("Choose from one unified skill library containing O*NET skills, O*NET workplace technologies, and controlled job-market evidence.")
+    skill_options = skill_master["skill"].tolist()
     selected = st.multiselect("What skills do you have?", skill_options, placeholder="Search Python, SQL, Excel, Power BI, Critical Thinking...")
+
     if selected:
         meta = skill_master[skill_master["skill"].isin(selected)]
         with st.expander("Skill evidence"):
             evidence_cols = [c for c in ["skill", "source", "market_frequency", "hot_technology", "in_demand"] if c in meta.columns]
             st.dataframe(meta[evidence_cols], width="stretch", hide_index=True)
+
         matches = career_match(selected, skills_df, top_n=10)
         if not matches.empty:
             st.subheader("Best-Matching Careers")
             st.dataframe(matches, width="stretch", hide_index=True)
         else:
             st.info("No O*NET occupation profile matched the selected skills. Use the job recommendations below for direct market matching.")
+
+        with st.spinner("Loading job-market recommendations..."):
+            postings, tfidf, tfidf_matrix = load_job_engine()
         st.subheader("Recommended Job Postings")
         st.dataframe(recommend_jobs(selected, tfidf, tfidf_matrix, postings, top_n=10), width="stretch", hide_index=True)
     else:
@@ -112,11 +121,21 @@ elif page == "🧩 Skill Gap Analyzer":
     soc_code = target["O*NET-SOC Code"]
     occupation_title = target["Title"]
     st.caption(f"O*NET-SOC: **{soc_code}**")
-    selected = st.multiselect("Your current skills", skill_options, placeholder="Search and select skills...")
+
+    selected = st.multiselect("Your current skills", skill_master["skill"].tolist(), placeholder="Search and select skills...")
     if not selected:
         st.info("Select one or more skills to get personalized recommendations.")
     else:
-        gaps = get_occupation_skill_gaps(soc_code=soc_code, selected_skills=selected, skills_df=skills_df, software_df=software_df, postings_df=postings, top_n=12)
+        with st.spinner("Loading job-market evidence..."):
+            postings = get_market_data()
+        gaps = get_occupation_skill_gaps(
+            soc_code=soc_code,
+            selected_skills=selected,
+            skills_df=skills_df,
+            software_df=software_df,
+            postings_df=postings,
+            top_n=12,
+        )
         st.success(f"Target profile loaded: **{occupation_title} ({soc_code})**")
         if gaps.empty:
             st.warning("No skill recommendations were found for this occupation.")
@@ -141,11 +160,13 @@ elif page == "🧩 Skill Gap Analyzer":
 
 else:
     st.header("🔎 Job Explorer")
+    postings = get_market_data()
     col1, col2 = st.columns(2)
     with col1:
         title_search = st.text_input("Job title contains", placeholder="e.g. Data Scientist")
     with col2:
         location_search = st.text_input("Location contains", placeholder="e.g. New York")
+
     col1, col2, col3 = st.columns(3)
     with col1:
         work_types = ["All"] + sorted(postings["formatted_work_type"].dropna().astype(str).unique().tolist()) if "formatted_work_type" in postings else ["All"]
@@ -155,6 +176,7 @@ else:
         experience = st.selectbox("Experience", experiences)
     with col3:
         remote = st.selectbox("Remote", ["All", "Remote", "Not Remote", "Unknown"])
+
     min_salary = st.number_input("Minimum normalized salary", min_value=0, value=0, step=5000)
     filtered = filter_jobs(postings, title=title_search or None, location=location_search or None, work_type=work_type, experience=experience, remote=remote, min_salary=min_salary if min_salary > 0 else None)
     st.metric("Matching jobs", f"{len(filtered):,}")
