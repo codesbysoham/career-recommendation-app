@@ -1,31 +1,34 @@
 import pandas as pd
 import streamlit as st
 
-from CareerClassifier import (
-    build_skill_master,
-    career_match,
-    dashboard_metrics,
-    filter_jobs,
-    get_occupation_skill_gaps,
-    get_skill_gap_summary,
-    load_pipeline,
-    recommend_jobs,
-    top_counts,
-    occupation_lookup,
-)
-
-st.set_page_config(
-    page_title="Career Intelligence Dashboard",
-    page_icon="💼",
-    layout="wide",
-)
-
+st.set_page_config(page_title="Career Intelligence Dashboard", page_icon="💼", layout="wide")
 st.title("💼 Career Intelligence Dashboard")
-st.caption("Job-market analytics, career matching and skill-gap analysis.")
-st.write("DEBUG 1: app.py started")
+st.write("DEBUG A: app.py started before CareerClassifier import")
 
 try:
-    st.write("DEBUG 2: starting load_pipeline()")
+    st.write("DEBUG B: importing CareerClassifier")
+    from CareerClassifier import (
+        build_skill_master,
+        career_match,
+        dashboard_metrics,
+        filter_jobs,
+        get_occupation_skill_gaps,
+        get_skill_gap_summary,
+        load_pipeline,
+        recommend_jobs,
+        top_counts,
+        occupation_lookup,
+    )
+    st.write("DEBUG C: CareerClassifier import completed")
+except Exception as e:
+    st.error("CareerClassifier.py failed during import.")
+    st.exception(e)
+    st.stop()
+
+st.caption("Job-market analytics, career matching and skill-gap analysis.")
+st.write("DEBUG D: starting load_pipeline()")
+
+try:
     (
         postings,
         tfidf,
@@ -35,10 +38,9 @@ try:
         occupations_df,
         software_df,
     ) = load_pipeline()
-    st.write("DEBUG 3: load_pipeline() finished")
-
+    st.write("DEBUG E: load_pipeline() finished")
     skill_master = build_skill_master(skills_df, software_df, postings)
-    st.write("DEBUG 4: build_skill_master() finished")
+    st.write("DEBUG F: build_skill_master() finished")
 except Exception as e:
     st.error("The recommendation engine could not start.")
     st.exception(e)
@@ -46,15 +48,7 @@ except Exception as e:
 
 skill_options = skill_master["skill"].tolist()
 
-page = st.sidebar.radio(
-    "Navigate",
-    [
-        "📊 Market Dashboard",
-        "🎯 Career Matcher",
-        "🧩 Skill Gap Analyzer",
-        "🔎 Job Explorer",
-    ],
-)
+page = st.sidebar.radio("Navigate", ["📊 Market Dashboard", "🎯 Career Matcher", "🧩 Skill Gap Analyzer", "🔎 Job Explorer"])
 
 if page == "📊 Market Dashboard":
     st.header("Job Market Overview")
@@ -65,7 +59,6 @@ if page == "📊 Market Dashboard":
     c3.metric("Unique Titles", f"{titles:,}")
     c4.metric("Remote Jobs", f"{remote:,}")
     c5.metric("Median Salary", f"${median_salary:,.0f}" if pd.notna(median_salary) else "N/A")
-
     st.divider()
     left, right = st.columns(2)
     with left:
@@ -74,7 +67,6 @@ if page == "📊 Market Dashboard":
     with right:
         st.subheader("Top Locations")
         st.bar_chart(top_counts(postings["location"], 10), width="stretch")
-
     left, right = st.columns(2)
     with left:
         st.subheader("Work Type")
@@ -84,7 +76,6 @@ if page == "📊 Market Dashboard":
         st.subheader("Experience Level")
         if "formatted_experience_level" in postings:
             st.bar_chart(postings["formatted_experience_level"].fillna("Unknown").value_counts().head(10), width="stretch")
-
     st.subheader("Top Unified Skills")
     top_skills = skill_master.head(20).set_index("skill")["market_frequency"]
     if top_skills.sum() > 0:
@@ -96,22 +87,19 @@ elif page == "🎯 Career Matcher":
     st.header("🎯 Career Matcher")
     st.write("Choose from one unified skill library containing O*NET skills, O*NET workplace technologies, and controlled job-market evidence.")
     selected = st.multiselect("What skills do you have?", skill_options, placeholder="Search Python, SQL, Excel, Power BI, Critical Thinking...")
-
     if selected:
         meta = skill_master[skill_master["skill"].isin(selected)]
         with st.expander("Skill evidence"):
             evidence_cols = [c for c in ["skill", "source", "market_frequency", "hot_technology", "in_demand"] if c in meta.columns]
-            st.dataframe(meta[evidence_cols], use_container_width=False, width="stretch", hide_index=True)
-
+            st.dataframe(meta[evidence_cols], width="stretch", hide_index=True)
         matches = career_match(selected, skills_df, top_n=10)
         if not matches.empty:
             st.subheader("Best-Matching Careers")
-            st.dataframe(matches, use_container_width=False, width="stretch", hide_index=True)
+            st.dataframe(matches, width="stretch", hide_index=True)
         else:
             st.info("No O*NET occupation profile matched the selected skills. Use the job recommendations below for direct market matching.")
-
         st.subheader("Recommended Job Postings")
-        st.dataframe(recommend_jobs(selected, tfidf, tfidf_matrix, postings, top_n=10), use_container_width=False, width="stretch", hide_index=True)
+        st.dataframe(recommend_jobs(selected, tfidf, tfidf_matrix, postings, top_n=10), width="stretch", hide_index=True)
     else:
         st.info("Select one or more skills to start.")
 
@@ -124,7 +112,6 @@ elif page == "🧩 Skill Gap Analyzer":
     soc_code = target["O*NET-SOC Code"]
     occupation_title = target["Title"]
     st.caption(f"O*NET-SOC: **{soc_code}**")
-
     selected = st.multiselect("Your current skills", skill_options, placeholder="Search and select skills...")
     if not selected:
         st.info("Select one or more skills to get personalized recommendations.")
@@ -140,26 +127,17 @@ elif page == "🧩 Skill Gap Analyzer":
             display_gap_cols = ["skill", "skill_type", "priority_score", "importance", "software_hot", "software_demand", "cooccurrence", "reason"]
             if not high.empty:
                 st.markdown("### 🔴 High Priority")
-                st.dataframe(high[display_gap_cols], use_container_width=False, width="stretch", hide_index=True)
+                st.dataframe(high[display_gap_cols], width="stretch", hide_index=True)
             if not medium.empty:
                 st.markdown("### 🟠 Other Relevant Skills")
-                st.dataframe(medium[display_gap_cols], use_container_width=False, width="stretch", hide_index=True)
+                st.dataframe(medium[display_gap_cols], width="stretch", hide_index=True)
             st.info(get_skill_gap_summary(gaps))
             with st.expander("How did the model rank these?"):
-                st.markdown("""
-**Priority score combines four signals:**
-
-- **O*NET importance** — how important the skill is to the occupation.
-- **Hot Technology** — O*NET employer-market signal.
-- **In Demand** — O*NET employer-market signal.
-- **Skill co-occurrence** — how often the candidate skill appears alongside one of your current skills in the job-posting skill data.
-
-The model removes skills you already selected before ranking.
-""")
+                st.markdown("**Priority score combines:** O*NET importance, Hot Technology, In Demand, and skill co-occurrence in job postings. Skills already selected are removed before ranking.")
             st.subheader("📈 Your Current Profile")
             selected_df = skill_master[skill_master["skill"].isin(selected)].copy()
             profile_cols = [c for c in ["skill", "source", "market_frequency", "hot_technology", "in_demand"] if c in selected_df.columns]
-            st.dataframe(selected_df[profile_cols], use_container_width=False, width="stretch", hide_index=True)
+            st.dataframe(selected_df[profile_cols], width="stretch", hide_index=True)
 
 else:
     st.header("🔎 Job Explorer")
@@ -168,24 +146,18 @@ else:
         title_search = st.text_input("Job title contains", placeholder="e.g. Data Scientist")
     with col2:
         location_search = st.text_input("Location contains", placeholder="e.g. New York")
-
     col1, col2, col3 = st.columns(3)
     with col1:
-        work_types = ["All"]
-        if "formatted_work_type" in postings:
-            work_types += sorted(postings["formatted_work_type"].dropna().astype(str).unique().tolist())
+        work_types = ["All"] + sorted(postings["formatted_work_type"].dropna().astype(str).unique().tolist()) if "formatted_work_type" in postings else ["All"]
         work_type = st.selectbox("Work type", work_types)
     with col2:
-        experiences = ["All"]
-        if "formatted_experience_level" in postings:
-            experiences += sorted(postings["formatted_experience_level"].dropna().astype(str).unique().tolist())
+        experiences = ["All"] + sorted(postings["formatted_experience_level"].dropna().astype(str).unique().tolist()) if "formatted_experience_level" in postings else ["All"]
         experience = st.selectbox("Experience", experiences)
     with col3:
         remote = st.selectbox("Remote", ["All", "Remote", "Not Remote", "Unknown"])
-
     min_salary = st.number_input("Minimum normalized salary", min_value=0, value=0, step=5000)
     filtered = filter_jobs(postings, title=title_search or None, location=location_search or None, work_type=work_type, experience=experience, remote=remote, min_salary=min_salary if min_salary > 0 else None)
     st.metric("Matching jobs", f"{len(filtered):,}")
     display_cols = [c for c in ["title", "company_name", "location", "formatted_work_type", "formatted_experience_level", "remote_label", "normalized_salary", "views", "applies", "job_posting_url"] if c in filtered.columns]
-    st.dataframe(filtered[display_cols].head(200), use_container_width=False, width="stretch", hide_index=True)
+    st.dataframe(filtered[display_cols].head(200), width="stretch", hide_index=True)
     st.caption("Showing up to 200 matching postings.")
