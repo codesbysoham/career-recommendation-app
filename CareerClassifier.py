@@ -1,4 +1,4 @@
-# Career Intelligence Dashboard backend
+# Career Intelligence Dashboard — ML Skill Gap Engine
 import os
 import re
 import zipfile
@@ -50,31 +50,27 @@ def load_onet_data():
     knowledge = pd.read_excel(KNOWLEDGE_PATH)
     occupations = pd.read_excel(OCCUPATIONS_PATH)
     software = pd.read_excel(SOFTWARE_SKILLS_PATH)
-
     return skills, knowledge, occupations, software
 
 
-@st.cache_resource(show_spinner="Loading job market and building model...")
+@st.cache_resource(show_spinner="Loading job market and ML model...")
 def load_pipeline():
     _download_postings()
-
     postings = pd.read_csv(POSTINGS_PATH, low_memory=False)
 
-    required = {
+    defaults = {
         "title": "",
         "company_name": "Unknown",
         "location": "Unknown",
         "description": "",
         "skills_desc": "",
     }
-    for col, default in required.items():
+    for col, default in defaults.items():
         if col not in postings.columns:
             postings[col] = default
 
-    for col in [
-        "max_salary", "med_salary", "min_salary", "normalized_salary",
-        "views", "applies"
-    ]:
+    for col in ["max_salary", "med_salary", "min_salary",
+                "normalized_salary", "views", "applies"]:
         if col not in postings.columns:
             postings[col] = np.nan
         postings[col] = pd.to_numeric(postings[col], errors="coerce")
@@ -89,211 +85,113 @@ def load_pipeline():
     else:
         postings["remote_label"] = "Unknown"
 
-    if "listed_time" in postings.columns:
-        postings["listed_date"] = pd.to_datetime(
-            postings["listed_time"], errors="coerce", unit="ms"
-        )
-    else:
-        postings["listed_date"] = pd.NaT
-
+    # TF-IDF powers job recommendation and occupation-to-job similarity.
+    model_text = postings["title"] + " " + postings["description"]
     tfidf = TfidfVectorizer(
-        max_features=3000,
-        ngram_range=(1, 1),
+        max_features=5000,
+        ngram_range=(1, 2),
         stop_words="english",
         min_df=3,
-        max_df=0.85,
+        max_df=0.90,
         sublinear_tf=True,
         dtype=np.float32,
     )
-
-    # Title is deliberately included: it is a strong career signal.
-    model_text = postings["title"] + " " + postings["description"]
     tfidf_matrix = tfidf.fit_transform(model_text)
 
     skills, knowledge, occupations, software = load_onet_data()
-
     return postings, tfidf, tfidf_matrix, skills, knowledge, occupations, software
 
 
-def _norm_skill(value):
+def _norm(value):
     value = str(value).strip().lower()
     value = re.sub(r"[^a-z0-9+#.&/-]+", " ", value)
-    value = re.sub(r"\s+", " ", value).strip()
-    return value
+    return re.sub(r"\s+", " ", value).strip()
 
 
-def _display_skill(value):
-    value = re.sub(r"\s+", " ", str(value).strip())
-    return value
-
-
-# Common variants that should be treated as the same user-facing skill.
 ALIASES = {
     "python programming": "Python",
     "python programming language": "Python",
     "structured query language": "SQL",
-    "microsoft sql server": "SQL Server",
     "ms excel": "Microsoft Excel",
     "microsoft excel": "Microsoft Excel",
+    "excel": "Excel",
     "power bi": "Power BI",
     "microsoft power bi": "Power BI",
-    "machine learning": "Machine Learning",
-    "deep learning": "Deep Learning",
-    "natural language processing": "Natural Language Processing",
     "nlp": "Natural Language Processing",
-    "artificial intelligence": "Artificial Intelligence",
+    "natural language processing": "Natural Language Processing",
     "ai": "Artificial Intelligence",
+    "artificial intelligence": "Artificial Intelligence",
 }
 
 
-def _canonical(value):
-    clean = _display_skill(value)
-    key = _norm_skill(clean)
-    return ALIASES.get(key, clean)
+def canonical_skill(value):
+    clean = re.sub(r"\s+", " ", str(value).strip())
+    return ALIASES.get(_norm(clean), clean)
 
 
 @st.cache_data(show_spinner="Building unified skill library...")
 def build_skill_master(skills_df, software_df, postings_df):
-    """
-    Create ONE user-facing skill universe.
-
-    Sources:
-      1. O*NET Skills.xlsx
-      2. O*NET 30.3 Software Skills.xlsx
-      3. Skills explicitly appearing in the 2,439 non-empty skills_desc fields.
-
-    skills_desc is treated as market evidence, not as a clean taxonomy.
-    """
+    """Create one searchable skill universe without turning random prose into skills."""
     rows = []
 
-    # ---- O*NET general skills ----
     if "Element Name" in skills_df.columns:
         for s in skills_df["Element Name"].dropna().unique():
-            skill = _canonical(s)
-            if skill:
+            s = canonical_skill(s)
+            if len(s) >= 2:
                 rows.append({
-                    "skill": skill,
-                    "source_onet": 1,
-                    "source_software": 0,
-                    "market_frequency": 0,
-                    "hot_technology": 0,
-                    "in_demand": 0,
+                    "skill": s, "source_onet": 1, "source_software": 0,
+                    "market_frequency": 0, "hot_technology": 0, "in_demand": 0
                 })
 
-    # ---- O*NET software/workplace examples ----
     if "Workplace Example" in software_df.columns:
         for _, r in software_df.iterrows():
-            raw = r["Workplace Example"]
-            if pd.isna(raw):
+            s = r.get("Workplace Example")
+            if pd.isna(s):
                 continue
-            skill = _canonical(raw)
-            if not skill:
+            s = canonical_skill(s)
+            if len(s) < 2:
                 continue
             rows.append({
-                "skill": skill,
-                "source_onet": 0,
-                "source_software": 1,
+                "skill": s, "source_onet": 0, "source_software": 1,
                 "market_frequency": 0,
                 "hot_technology": int(str(r.get("Hot Technology", "N")).upper() == "Y"),
-                "in_demand": int(str(r.get("In Demand", "N")).upper() == "Y"),
+                "in_demand": int(str(r.get("In Demand", "N")).upper() == "Y")
             })
 
-    # First collapse the O*NET vocabulary.
-    master = pd.DataFrame(rows)
-    master = (
-        master.groupby("skill", as_index=False)
-        .agg(
-            source_onet=("source_onet", "max"),
-            source_software=("source_software", "max"),
-            market_frequency=("market_frequency", "sum"),
-            hot_technology=("hot_technology", "max"),
-            in_demand=("in_demand", "max"),
-        )
+    master = pd.DataFrame(rows).groupby("skill", as_index=False).agg(
+        source_onet=("source_onet", "max"),
+        source_software=("source_software", "max"),
+        market_frequency=("market_frequency", "max"),
+        hot_technology=("hot_technology", "max"),
+        in_demand=("in_demand", "max"),
     )
 
-    # ---- Market evidence from the 2,439 structured-ish skills_desc rows ----
-    # Match only against the O*NET-derived vocabulary. This prevents random
-    # prose words from becoming "skills".
-    vocab = {
-        _norm_skill(s): s
-        for s in master["skill"]
-        if len(_norm_skill(s)) >= 2
-    }
+    # Market evidence: only match against our controlled O*NET vocabulary.
+    vocab = {_norm(s): s for s in master["skill"]}
+    counts = {}
 
-    # Add a small set of very common job-market skills that may not appear
-    # as exact O*NET Workplace Examples.
-    market_seed = [
-        "Python", "SQL", "R", "Java", "JavaScript", "C++", "C#", "Excel",
-        "Microsoft Excel", "Power BI", "Tableau", "Git", "GitHub", "AWS",
-        "Microsoft Azure", "Docker", "Kubernetes", "TensorFlow", "PyTorch",
-        "Pandas", "NumPy", "Scikit-learn", "Spark", "Hadoop", "PostgreSQL",
-        "MySQL", "Oracle", "MongoDB", "Machine Learning", "Deep Learning",
-        "Data Analysis", "Data Science", "Statistics", "Data Visualization",
-        "Natural Language Processing", "Computer Vision", "Artificial Intelligence",
-    ]
-    for s in market_seed:
-        c = _canonical(s)
-        vocab.setdefault(_norm_skill(c), c)
+    if "skills_desc" in postings_df.columns:
+        for text in postings_df.loc[
+            postings_df["skills_desc"].str.strip().ne(""), "skills_desc"
+        ]:
+            t = _norm(text)
+            for key, display in vocab.items():
+                if len(key) >= 3 and re.search(r"(?<!\w)" + re.escape(key) + r"(?!\w)", t):
+                    counts[display] = counts.get(display, 0) + 1
 
-    freq = {}
-
-    def ngrams(tokens, max_n=7):
-        for n in range(1, min(max_n, len(tokens)) + 1):
-            for i in range(len(tokens) - n + 1):
-                yield " ".join(tokens[i:i+n])
-
-    market_text = postings_df.loc[
-        postings_df["skills_desc"].str.strip().ne(""),
-        "skills_desc"
-    ].tolist()
-
-    # 2,439 rows is small enough for this controlled vocabulary scan.
-    for text in market_text:
-        text_norm = _norm_skill(text)
-        tokens = text_norm.split()
-        found = set()
-
-        # Exact vocabulary phrase matching via n-grams.
-        for phrase in ngrams(tokens, max_n=7):
-            if phrase in vocab:
-                found.add(vocab[phrase])
-
-        for skill in found:
-            freq[skill] = freq.get(skill, 0) + 1
-
-    if freq:
-        freq_df = pd.DataFrame(
-            [{"skill": k, "market_frequency": v} for k, v in freq.items()]
+    if counts:
+        freq = pd.DataFrame(
+            [{"skill": k, "market_frequency": v} for k, v in counts.items()]
         )
-        master = master.merge(
-            freq_df,
-            on="skill",
-            how="outer",
-            suffixes=("", "_new"),
-        )
-        master["market_frequency"] = master["market_frequency_new"].fillna(
+        master = master.merge(freq, on="skill", how="left", suffixes=("", "_market"))
+        master["market_frequency"] = master["market_frequency_market"].fillna(
             master["market_frequency"]
         )
-        master.drop(columns=["market_frequency_new"], inplace=True)
+        master.drop(columns=["market_frequency_market"], inplace=True)
 
-    # Ensure seed skills that genuinely occur in the controlled vocabulary
-    # are visible even when they have no skills_desc evidence.
-    seed_rows = []
-    existing = set(master["skill"])
-    for s in market_seed:
-        c = _canonical(s)
-        if c not in existing:
-            seed_rows.append({
-                "skill": c,
-                "source_onet": 0,
-                "source_software": 0,
-                "market_frequency": int(freq.get(c, 0)),
-                "hot_technology": 0,
-                "in_demand": 0,
-            })
-
-    if seed_rows:
-        master = pd.concat([master, pd.DataFrame(seed_rows)], ignore_index=True)
+    master["market_frequency"] = master["market_frequency"].fillna(0).astype(int)
+    master["hot_technology"] = master["hot_technology"].fillna(0).astype(int)
+    master["in_demand"] = master["in_demand"].fillna(0).astype(int)
 
     master["source"] = np.select(
         [
@@ -302,66 +200,243 @@ def build_skill_master(skills_df, software_df, postings_df):
             master["source_onet"] == 1,
             master["market_frequency"] > 0,
         ],
-        [
-            "O*NET + Software",
-            "O*NET Software",
-            "O*NET Skill",
-            "Job postings",
-        ],
-        default="Job postings",
+        ["O*NET + Software", "O*NET Software", "O*NET Skill", "Job postings"],
+        default="O*NET",
     )
 
-    # User-facing list: remove ultra-generic/obviously malformed software
-    # names, but retain legitimate niche software technologies.
-    master = master[
+    return master[
         master["skill"].str.len().between(2, 120)
-    ].copy()
-
-    master["market_frequency"] = master["market_frequency"].fillna(0).astype(int)
-    master["hot_technology"] = master["hot_technology"].fillna(0).astype(int)
-    master["in_demand"] = master["in_demand"].fillna(0).astype(int)
-
-    return master.sort_values(
+    ].sort_values(
         ["market_frequency", "hot_technology", "skill"],
         ascending=[False, False, True],
-        kind="stable",
+        kind="stable"
     ).reset_index(drop=True)
 
 
 @st.cache_data
-def get_skill_profile(skills_df):
-    importance = (
-        skills_df[skills_df["Scale ID"] == "IM"]
-        .pivot_table(
-            index=["O*NET-SOC Code", "Title"],
-            columns="Element Name",
-            values="Data Value",
-            aggfunc="mean",
-        )
-        .fillna(0)
-    )
-    level = (
-        skills_df[skills_df["Scale ID"] == "LV"]
-        .pivot_table(
-            index=["O*NET-SOC Code", "Title"],
-            columns="Element Name",
-            values="Data Value",
-            aggfunc="mean",
-        )
-        .fillna(0)
-    )
+def build_occupation_profiles(skills_df):
+    """Create O*NET occupation skill profiles keyed by SOC code, not title."""
+    df = skills_df.copy()
+    df["Data Value"] = pd.to_numeric(df["Data Value"], errors="coerce")
+
+    importance = df[df["Scale ID"].eq("IM")].pivot_table(
+        index=["O*NET-SOC Code", "Title"],
+        columns="Element Name",
+        values="Data Value",
+        aggfunc="mean",
+    ).fillna(0)
+
+    level = df[df["Scale ID"].eq("LV")].pivot_table(
+        index=["O*NET-SOC Code", "Title"],
+        columns="Element Name",
+        values="Data Value",
+        aggfunc="mean",
+    ).fillna(0)
+
     return importance, level
 
 
-def career_match(selected_skills, skills_df, skill_master, top_n=10):
-    """Rank O*NET occupations by selected O*NET/general skills."""
-    importance, _ = get_skill_profile(skills_df)
+def occupation_lookup(occupations_df):
+    """Stable UI lookup: display title -> SOC code."""
+    x = occupations_df[["O*NET-SOC Code", "Title"]].dropna().drop_duplicates()
+    return x.sort_values("Title").reset_index(drop=True)
 
-    # Only O*NET-mappable selected skills contribute to occupation scoring.
-    selected = [
-        s for s in selected_skills
-        if s in importance.columns
-    ]
+
+def get_occupation_skill_gaps(
+    soc_code,
+    selected_skills,
+    skills_df,
+    software_df,
+    postings_df,
+    top_n=12,
+):
+    """
+    Rank missing skills for a target occupation.
+
+    General O*NET skills:
+        importance drives the score.
+
+    Software skills:
+        Hot Technology + In Demand + occupation association drive the score.
+
+    ML layer:
+        skill co-occurrence with the user's existing skills provides a
+        personalization bonus when the skill appears in job-posting skill text.
+    """
+    selected_norm = {_norm(canonical_skill(s)) for s in selected_skills}
+
+    # ---------- O*NET general skills ----------
+    importance, _ = build_occupation_profiles(skills_df)
+    general = pd.DataFrame()
+
+    if soc_code in importance.index.get_level_values(0):
+        row = importance.loc[soc_code]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[0]
+
+        general = pd.DataFrame({
+            "skill": importance.columns,
+            "importance": [float(row.get(c, 0)) for c in importance.columns],
+        })
+        general["skill_type"] = "O*NET Skill"
+        general["software_hot"] = 0
+        general["software_demand"] = 0
+        general["onet_software"] = 0
+
+    # ---------- O*NET Software Skills ----------
+    software = software_df[
+        software_df["O*NET-SOC Code"].astype(str).eq(str(soc_code))
+    ].copy()
+
+    tech = pd.DataFrame()
+    if not software.empty:
+        tech = software[[
+            "Workplace Example", "Hot Technology", "In Demand"
+        ]].dropna(subset=["Workplace Example"]).copy()
+
+        tech["skill"] = tech["Workplace Example"].map(canonical_skill)
+        tech["software_hot"] = (
+            tech["Hot Technology"].astype(str).str.upper().eq("Y").astype(int)
+        )
+        tech["software_demand"] = (
+            tech["In Demand"].astype(str).str.upper().eq("Y").astype(int)
+        )
+        tech["importance"] = 0.0
+        tech["skill_type"] = "Technical / Software"
+        tech["onet_software"] = 1
+
+        tech = tech.groupby("skill", as_index=False).agg({
+            "importance": "max",
+            "software_hot": "max",
+            "software_demand": "max",
+            "skill_type": "first",
+            "onet_software": "max",
+        })
+
+    candidates = pd.concat(
+        [
+            general[[
+                "skill", "importance", "software_hot",
+                "software_demand", "skill_type", "onet_software"
+            ]],
+            tech[[
+                "skill", "importance", "software_hot",
+                "software_demand", "skill_type", "onet_software"
+            ]],
+        ],
+        ignore_index=True,
+    )
+
+    if candidates.empty:
+        return candidates
+
+    # Deduplicate exact canonical names.
+    candidates["skill_key"] = candidates["skill"].map(_norm)
+    candidates = candidates.sort_values(
+        ["software_hot", "software_demand", "importance"],
+        ascending=False
+    ).drop_duplicates("skill_key")
+
+    # ---------- ML-ish personalization: co-occurrence ----------
+    # Build a controlled skill co-occurrence matrix from skills_desc.
+    # This asks: among postings mentioning the target skill, how often do
+    # the user's current skills also occur?
+    selected_keys = list(selected_norm)
+
+    def occurrence(text, skill_key):
+        if not skill_key:
+            return False
+        return bool(re.search(
+            r"(?<!\w)" + re.escape(skill_key) + r"(?!\w)",
+            _norm(text)
+        ))
+
+    co_bonus = {}
+    if selected_keys and "skills_desc" in postings_df.columns:
+        texts = postings_df.loc[
+            postings_df["skills_desc"].str.strip().ne(""), "skills_desc"
+        ].astype(str).tolist()
+
+        # Limit candidate vocabulary to the target occupation's skills.
+        for _, r in candidates.iterrows():
+            candidate_key = r["skill_key"]
+            if candidate_key in selected_norm:
+                continue
+
+            target_count = 0
+            joint_count = 0
+
+            for text in texts:
+                if occurrence(text, candidate_key):
+                    target_count += 1
+                    if any(occurrence(text, s) for s in selected_keys):
+                        joint_count += 1
+
+            co_bonus[r["skill_key"]] = (
+                joint_count / target_count if target_count else 0.0
+            )
+
+    candidates["cooccurrence"] = candidates["skill_key"].map(co_bonus).fillna(0.0)
+
+    # Score:
+    # 40% O*NET importance
+    # 25% software "hot" signal
+    # 20% software "in demand" signal
+    # 15% complementarity with current skills
+    #
+    # For software skills, importance is absent, so the other signals carry
+    # the ranking. This is intentional rather than inventing an O*NET score.
+    imp = candidates["importance"].clip(0, 5) / 5
+    hot = candidates["software_hot"]
+    demand = candidates["software_demand"]
+    co = candidates["cooccurrence"]
+
+    candidates["priority_score"] = (
+        0.40 * imp +
+        0.25 * hot +
+        0.20 * demand +
+        0.15 * co
+    ) * 100
+
+    candidates["already_have"] = candidates["skill_key"].isin(selected_norm)
+    candidates = candidates[~candidates["already_have"]].copy()
+
+    candidates["reason"] = np.select(
+        [
+            candidates["cooccurrence"] >= 0.50,
+            candidates["software_hot"].eq(1),
+            candidates["software_demand"].eq(1),
+            candidates["importance"] >= 4.0,
+        ],
+        [
+            "Strongly complements your existing skills in job-posting data.",
+            "Marked as a Hot Technology for this occupation.",
+            "Marked as In Demand for this occupation.",
+            "High O*NET importance for this occupation.",
+        ],
+        default="Relevant to the target occupation.",
+    )
+
+    return candidates.sort_values(
+        ["priority_score", "importance", "software_demand", "skill"],
+        ascending=[False, False, False, True],
+    ).head(top_n).reset_index(drop=True)
+
+
+def get_skill_gap_summary(gaps):
+    if gaps.empty:
+        return "No target-occupation skill profile was found."
+
+    high = gaps[gaps["priority_score"] >= 65]["skill"].tolist()
+    if high:
+        return "Your highest-priority gaps are: " + ", ".join(high[:5]) + "."
+    return "The model found several relevant skills; start with the highest-ranked items below."
+
+
+def career_match(selected_skills, skills_df, top_n=10):
+    """Match selected O*NET general skills to occupations using SOC-keyed profiles."""
+    importance, _ = build_occupation_profiles(skills_df)
+    selected = [s for s in selected_skills if s in importance.columns]
 
     if not selected:
         return pd.DataFrame()
@@ -376,36 +451,10 @@ def career_match(selected_skills, skills_df, skill_master, top_n=10):
         "Skills Matched": (importance[selected] > 0).sum(axis=1).values,
     })
 
-    return (
-        result.sort_values(
-            ["Match Score", "Skills Matched"],
-            ascending=False,
-        )
-        .head(top_n)
-        .reset_index(drop=True)
-    )
-
-
-def get_skill_gaps(occupation_title, selected_skills, skills_df, top_n=10):
-    importance, _ = get_skill_profile(skills_df)
-    rows = importance.reset_index()
-    rows = rows[rows["Title"] == occupation_title]
-
-    if rows.empty:
-        return pd.DataFrame()
-
-    row = rows.iloc[0]
-    values = pd.DataFrame({
-        "Skill": importance.columns,
-        "Importance": [row.get(c, 0) for c in importance.columns],
-    })
-    values["Selected"] = values["Skill"].isin(selected_skills)
-
-    return (
-        values.sort_values("Importance", ascending=False)
-        .head(top_n)
-        .reset_index(drop=True)
-    )
+    return result.sort_values(
+        ["Match Score", "Skills Matched"],
+        ascending=False
+    ).head(top_n).reset_index(drop=True)
 
 
 def recommend_jobs(user_skills, tfidf, tfidf_matrix, postings_df, top_n=10):
@@ -418,18 +467,12 @@ def recommend_jobs(user_skills, tfidf, tfidf_matrix, postings_df, top_n=10):
             "title", "company_name", "location",
             "formatted_work_type", "formatted_experience_level",
             "remote_label", "normalized_salary", "job_posting_url"
-        ]
-        if c in postings_df.columns
+        ] if c in postings_df.columns
     ]
 
     result = postings_df[cols].copy()
     result["Match Score"] = similarity * 100
-
-    return (
-        result.sort_values("Match Score", ascending=False)
-        .head(top_n)
-        .reset_index(drop=True)
-    )
+    return result.sort_values("Match Score", ascending=False).head(top_n).reset_index(drop=True)
 
 
 def filter_jobs(postings, title=None, location=None, work_type=None,
@@ -438,19 +481,14 @@ def filter_jobs(postings, title=None, location=None, work_type=None,
 
     if title:
         df = df[df["title"].str.contains(title, case=False, na=False)]
-
     if location:
         df = df[df["location"].str.contains(location, case=False, na=False)]
-
     if work_type and work_type != "All" and "formatted_work_type" in df:
         df = df[df["formatted_work_type"].fillna("Unknown") == work_type]
-
     if experience and experience != "All" and "formatted_experience_level" in df:
         df = df[df["formatted_experience_level"].fillna("Unknown") == experience]
-
     if remote and remote != "All":
         df = df[df["remote_label"] == remote]
-
     if min_salary is not None:
         df = df[df["normalized_salary"].fillna(0) >= min_salary]
 
