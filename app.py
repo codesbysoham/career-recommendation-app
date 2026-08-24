@@ -144,16 +144,20 @@ elif page == "🎯 Career Matcher":
                 else:
                     st.dataframe(ai_suggestions, width="stretch", hide_index=True)
 
-        matches = rank_careers(selected, skills_df, top_n=10)
+        # IMPORTANT: pass the O*NET workplace-technology table as well as the
+        # general skill table. This makes software/technology selections such
+        # as Alteryx, Jira, Power BI, Tableau, Excel, etc. use the same generic
+        # career-ranking pipeline as general O*NET skills.
+        matches = rank_careers(selected, skills_df, software_df=software_df, top_n=10)
         if not matches.empty:
             st.subheader("Best-Matching Careers")
-            st.caption("ML score combines O*NET skill-vector similarity, O*NET skill importance and coverage of high-priority occupation skills. Gemini is not involved in this score.")
+            st.caption("ML score combines unified O*NET skill + workplace-technology similarity, evidence strength and occupation-feature coverage. Gemini is not involved in this score.")
             st.dataframe(matches, width="stretch", hide_index=True)
             with st.expander("How the ML career model works"):
                 st.markdown(
-                    "**Career matching pipeline:** selected skills → canonical skill mapping → O*NET occupation vectors → cosine similarity + importance weighting + skill coverage → ranked occupations."
+                    "**Career matching pipeline:** selected skills → canonical skill mapping → unified O*NET skill + workplace-technology occupation vectors → cosine similarity + evidence strength + feature coverage → ranked occupations."
                 )
-                st.markdown("**Score weights:** 55% vector similarity + 30% O*NET importance + 15% high-priority skill coverage.")
+                st.markdown("**Score weights:** 55% vector similarity + 30% matched-feature strength + 15% occupation-feature coverage.")
         else:
             st.info("No O*NET occupation profile matched the selected skills. Use the job recommendations below for direct market matching.")
         with st.spinner("Finding matching jobs..."):
