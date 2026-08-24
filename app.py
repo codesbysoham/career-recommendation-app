@@ -18,17 +18,16 @@ try:
         top_counts,
         occupation_lookup,
     )
-    from JobEngine import load_job_engine, load_postings
+    from JobEngine import load_job_engine, load_postings, load_skill_postings
 except Exception as e:
     st.error("The recommendation engine could not start.")
     st.exception(e)
     st.stop()
 
-# Startup deliberately loads only the small O*NET files. The 123k job dataset
-# and TF-IDF model are loaded only after the user asks for job-market features.
+# Startup loads only the small O*NET files. Large job text is lazy-loaded.
 skills_df, knowledge_df, occupations_df, software_df = load_onet_data()
 
-@st.cache_data(show_spinner="Building skill library...")
+@st.cache_data(show_spinner=False)
 def get_base_skill_master():
     empty_postings = pd.DataFrame(columns=["title", "skills_desc"])
     return build_skill_master(skills_df, software_df, empty_postings)
@@ -66,16 +65,15 @@ if page == "📊 Market Dashboard":
         left, right = st.columns(2)
         with left:
             st.subheader("Work Type")
-            if "formatted_work_type" in postings:
-                st.bar_chart(postings["formatted_work_type"].fillna("Unknown").value_counts().head(10), width="stretch")
+            st.bar_chart(postings["formatted_work_type"].fillna("Unknown").value_counts().head(10), width="stretch")
         with right:
             st.subheader("Experience Level")
-            if "formatted_experience_level" in postings:
-                st.bar_chart(postings["formatted_experience_level"].fillna("Unknown").value_counts().head(10), width="stretch")
+            st.bar_chart(postings["formatted_experience_level"].fillna("Unknown").value_counts().head(10), width="stretch")
 
         st.subheader("Top Unified Skills")
         with st.spinner("Calculating market skill demand..."):
-            market_skills = build_skill_master(skills_df, software_df, postings)
+            skill_postings = load_skill_postings()
+            market_skills = build_skill_master(skills_df, software_df, skill_postings)
         top_skills = market_skills.head(20).set_index("skill")["market_frequency"]
         if top_skills.sum() > 0:
             st.bar_chart(top_skills, width="stretch")
@@ -122,7 +120,7 @@ elif page == "🧩 Skill Gap Analyzer":
         st.info("Select one or more skills to get personalized recommendations.")
     else:
         with st.spinner("Loading job-market evidence..."):
-            postings = load_postings()
+            postings = load_skill_postings()
         gaps = get_occupation_skill_gaps(
             soc_code=soc_code,
             selected_skills=selected,
@@ -165,10 +163,10 @@ else:
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        work_types = ["All"] + sorted(postings["formatted_work_type"].dropna().astype(str).unique().tolist()) if "formatted_work_type" in postings else ["All"]
+        work_types = ["All"] + sorted(postings["formatted_work_type"].dropna().astype(str).unique().tolist())
         work_type = st.selectbox("Work type", work_types)
     with col2:
-        experiences = ["All"] + sorted(postings["formatted_experience_level"].dropna().astype(str).unique().tolist()) if "formatted_experience_level" in postings else ["All"]
+        experiences = ["All"] + sorted(postings["formatted_experience_level"].dropna().astype(str).unique().tolist())
         experience = st.selectbox("Experience", experiences)
     with col3:
         remote = st.selectbox("Remote", ["All", "Remote", "Not Remote", "Unknown"])
