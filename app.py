@@ -11,7 +11,6 @@ st.caption("ML-driven job-market analytics, career matching and skill-gap analys
 try:
     from CareerClassifier import (
         build_skill_master,
-        career_match,
         dashboard_metrics,
         filter_jobs,
         get_occupation_skill_gaps,
@@ -20,6 +19,7 @@ try:
         top_counts,
         occupation_lookup,
     )
+    from AnalyticsEngine import rank_careers
     from JobEngine import load_postings, load_skill_postings
     from CareerAI import available as ai_available, explain_skill_gaps, suggest_skills
 except Exception as e:
@@ -144,16 +144,16 @@ elif page == "🎯 Career Matcher":
                 else:
                     st.dataframe(ai_suggestions, width="stretch", hide_index=True)
 
-        matches = career_match(selected, skills_df, top_n=10)
+        matches = rank_careers(selected, skills_df, top_n=10)
         if not matches.empty:
             st.subheader("Best-Matching Careers")
-            st.caption("ML score is based on the O*NET importance ratings of the skills in your profile. O*NET importance is rated on a 1–5 scale.")
+            st.caption("ML score combines O*NET skill-vector similarity, O*NET skill importance and coverage of high-priority occupation skills. Gemini is not involved in this score.")
             st.dataframe(matches, width="stretch", hide_index=True)
-            with st.expander("How the career model works"):
+            with st.expander("How the ML career model works"):
                 st.markdown(
-                    "**Career matching pipeline:** selected skills → canonical skill mapping → O*NET occupation skill profiles → importance-weighted match score → ranked occupations. "
-                    "The model uses O*NET occupational evidence as its source of truth; Gemini is not involved in the score."
+                    "**Career matching pipeline:** selected skills → canonical skill mapping → O*NET occupation vectors → cosine similarity + importance weighting + skill coverage → ranked occupations."
                 )
+                st.markdown("**Score weights:** 55% vector similarity + 30% O*NET importance + 15% high-priority skill coverage.")
         else:
             st.info("No O*NET occupation profile matched the selected skills. Use the job recommendations below for direct market matching.")
         with st.spinner("Finding matching jobs..."):
