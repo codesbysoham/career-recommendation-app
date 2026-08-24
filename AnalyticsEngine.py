@@ -8,7 +8,7 @@ ENGINE_VERSION is intentionally bumped whenever the matcher contract changes;
 it also helps Streamlit Cloud replace an older cached module after deployment.
 """
 
-ENGINE_VERSION = "2026.08.24-unified-v3"
+ENGINE_VERSION = "2026.08.24-unified-v4"
 
 import os
 
@@ -32,8 +32,6 @@ def _configure_kaggle_from_secrets():
             os.environ["KAGGLE_USERNAME"] = str(username).strip()
             os.environ["KAGGLE_KEY"] = str(key).strip()
     except Exception:
-        # Career matching itself does not require Kaggle until job-market data
-        # is requested. Do not make optional configuration crash app startup.
         pass
 
 
@@ -47,6 +45,18 @@ from CareerClassifier import (  # noqa: E402
     load_onet_data,
     _norm_soc,
 )
+
+# Kaggle's current package exposes a pre-authenticated global API object. Reuse
+# it when available so token-based authentication is not consumed twice by a
+# second KaggleApi() instance later in CareerClassifier._download_postings().
+try:  # noqa: E402
+    import kaggle
+    import CareerClassifier as _career_classifier
+
+    if getattr(kaggle, "api", None) is not None:
+        _career_classifier.KaggleApi = lambda: kaggle.api
+except Exception:
+    pass
 
 
 def _software_skill_matrix(software_df):
