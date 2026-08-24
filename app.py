@@ -21,6 +21,7 @@ try:
         occupation_lookup,
     )
     from JobEngine import load_postings, load_skill_postings
+    from CareerAI import available as ai_available, explain_skill_gaps, suggest_skills
 except Exception as e:
     st.error("The recommendation engine could not start.")
     st.exception(e)
@@ -59,7 +60,6 @@ def safe_job_recommendations(selected_skills, top_n=10):
     base = base.iloc[:n].copy()
     skill_text = skill_text.iloc[:n].copy()
 
-    # Score in chunks so we never create a large intermediate matrix.
     scores = np.zeros(n, dtype=np.float32)
     matched = np.zeros(n, dtype=np.int16)
     chunk_size = 10000
@@ -69,8 +69,6 @@ def safe_job_recommendations(selected_skills, top_n=10):
         clean = re.sub(r"\s+", " ", skill.lower()).strip()
         if not clean:
             continue
-        # Boundary-aware phrase matching. re.escape makes skills such as
-        # C++, C#, .NET, Node.js and Power BI safe.
         patterns.append(re.compile(r"(?<![a-z0-9])" + re.escape(clean) + r"(?![a-z0-9])", re.I))
 
     for start in range(0, n, chunk_size):
@@ -84,8 +82,6 @@ def safe_job_recommendations(selected_skills, top_n=10):
             title_hit = titles.str.contains(pattern, na=False).to_numpy()
             skill_hit = skills.str.contains(pattern, na=False).to_numpy()
             hit = title_hit | skill_hit
-            # Skills listed in skills_desc are stronger evidence than a title
-            # mention, while title matches still contribute useful signal.
             chunk_scores += skill_hit.astype(np.float32) * 1.0
             chunk_scores += (title_hit & ~skill_hit).astype(np.float32) * 0.7
             chunk_matched += hit.astype(np.int16)
@@ -173,6 +169,20 @@ elif page == "🎯 Career Matcher":
             evidence_cols = [c for c in ["skill", "source", "market_frequency", "hot_technology", "in_demand"] if c in meta.columns]
             st.dataframe(meta[evidence_cols], width="stretch", hide_index=True)
 
+        # LLM is used as a grounded ranking/explanation layer. It can only
+        # recommend skills already present in the controlled skill library.
+        with st.expander("✨ AI Skill Advisor", expanded=False):
+            st.caption("The AI ranks complementary skills from the existing O*NET + market skill library; it does not invent new skills.")
+            if not ai_available():
+                st.info("AI is optional. Add an OpenAI API key to enable this advisor; the rest of the matcher works without it.")
+            elif st.button("Suggest complementary skills", key="matcher_ai_suggest"):
+                with st.spinner("AI is analyzing your skill combination..."):
+                    ai_suggestions = suggest_skills(selected, skill_master=skill_master, limit=8)
+                if ai_suggestions.empty:
+                    st.warning("The AI could not produce validated suggestions from the current skill library.")
+                else:
+                    st.dataframe(ai_suggestions, width="stretch", hide_index=True)
+
         matches = career_match(selected, skills_df, top_n=10)
         if not matches.empty:
             st.subheader("Best-Matching Careers")
@@ -205,9 +215,38 @@ elif page == "🧩 Skill Gap Analyzer":
     occupation_title = target["Title"]
     st.caption(f"O*NET-SOC: **{soc_code}**")
 
-    selected = st.multiselect("Your current skills", skill_master["skill"].tolist(), placeholder="Search and select skills...")
+    selected = st.multiselect(
+        "Your current skills",
+        skill_master["skill"].tolist(),
+        placeholder="Search and select skills...",
+        key="gap_current_skills",
+    )
+
+    # AI suggestions are available even before the user has selected current
+    # skills, so choosing a target career immediately gives them a starting point.
+    with st.expander("✨ AI Suggested Skills", expanded=not selected):
+        st.caption("Suggestions are restricted to skills already present in the app's O*NET + market library.")
+        if not ai_available():
+            st.info("Add an OpenAI API key to enable AI suggestions. The evidence-based skill-gap model below remains fully functional.")
+        else:
+            if st.button("Suggest skills for this career", key="gap_ai_suggest"):
+                with st.spinner("AI is ranking skills for this career..."):
+                    suggestions = suggest_skills(selected, target_career=occupation_title, skill_master=skill_master, limit=10)
+                st.session_state["gap_ai_suggestions"] = suggestions
+
+            suggestions = st.session_state.get("gap_ai_suggestions", pd.DataFrame())
+            if isinstance(suggestions, pd.DataFrame) and not suggestions.empty:
+                st.dataframe(suggestions, width="stretch", hide_index=True)
+                addable = [s for s in suggestions["skill"].tolist() if s not in selected]
+                if addable:
+                    add_selected = st.multiselect("Add suggested skills to your profile", addable, key="gap_ai_add")
+                    if st.button("Add selected skills", key="gap_ai_add_button") and add_selected:
+                        merged = list(dict.fromkeys(list(selected) + add_selected))
+                        st.session_state["gap_current_skills"] = merged
+                        st.rerun()
+
     if not selected:
-        st.info("Select one or more skills to get personalized recommendations.")
+        st.info("Select one or more current skills, or use the AI suggestions above to build your profile.")
     else:
         with st.spinner("Loading job-market evidence..."):
             postings = load_skill_postings()
@@ -234,6 +273,19 @@ elif page == "🧩 Skill Gap Analyzer":
                 st.markdown("### 🟠 Other Relevant Skills")
                 st.dataframe(medium[display_gap_cols], width="stretch", hide_index=True)
             st.info(get_skill_gap_summary(gaps))
+
+            with st.expander("🤖 AI Career Coach"):
+                st.caption("The ML/O*NET engine determines the evidence and ranking. The LLM only explains that evidence and turns it into a practical plan.")
+                if not ai_available():
+                    st.info("Add an OpenAI API key to enable the AI explanation.")
+                elif st.button("Explain my skill gaps", key="gap_ai_explain"):
+                    with st.spinner("AI is turning the evidence into a learning plan..."):
+                        explanation = explain_skill_gaps(occupation_title, selected, gaps)
+                    if explanation:
+                        st.markdown(explanation)
+                    else:
+                        st.warning("The AI could not generate an explanation right now.")
+
             with st.expander("How did the model rank these?"):
                 st.markdown("**Priority score combines:** O*NET importance, Hot Technology, In Demand, and skill co-occurrence in job postings. Skills already selected are removed before ranking.")
             st.subheader("📈 Your Current Profile")
