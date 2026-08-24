@@ -3,7 +3,12 @@
 The ML layer is deliberately independent from the LLM layer. Career ranking
 uses one unified feature space made from O*NET general skills plus O*NET
 workplace technologies. No skill name receives a special-case rule.
+
+ENGINE_VERSION is intentionally bumped whenever the matcher contract changes;
+it also helps Streamlit Cloud replace an older cached module after deployment.
 """
+
+ENGINE_VERSION = "2026.08.24-unified-v2"
 
 import numpy as np
 import pandas as pd
@@ -63,9 +68,10 @@ def rank_careers(selected_skills, skills_df, software_df=None, top_n=10):
       2. O*NET workplace technologies, represented by occupation association
          plus Hot Technology / In Demand evidence.
 
-    If ``software_df`` is omitted (the current app API), it is loaded through
-    the existing cached O*NET loader automatically. This keeps the UI generic
-    and prevents software skills from silently falling out of career matching.
+    ``software_df`` is optional for backward compatibility. When omitted, the
+    cached O*NET loader supplies the technology table automatically. This
+    means the function remains generic for every software/technology skill;
+    there are no Alteryx/Jira/Power BI/Excel-specific branches.
 
     Components:
       - 55% cosine similarity
@@ -78,9 +84,6 @@ def rank_careers(selected_skills, skills_df, software_df=None, top_n=10):
     if importance.empty:
         return pd.DataFrame()
 
-    # The current app calls rank_careers(selected, skills_df), so make the
-    # complete unified feature space available without requiring a skill-
-    # specific change in app.py.
     if software_df is None:
         try:
             _, _, _, software_df = load_onet_data()
@@ -107,7 +110,7 @@ def rank_careers(selected_skills, skills_df, software_df=None, top_n=10):
     matrix = matrix.fillna(0.0).astype(float)
 
     # Canonicalize every selection and keep every feature that exists in the
-    # unified space. There is deliberately NO if skill == "Alteryx" logic.
+    # unified space. There is deliberately NO skill-specific special case.
     selected = []
     for skill in selected_skills:
         canonical = canonical_skill(skill)
