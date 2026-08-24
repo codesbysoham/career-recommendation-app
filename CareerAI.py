@@ -5,26 +5,51 @@ import re
 import pandas as pd
 import streamlit as st
 
+
 MODEL = "gemini-2.5-flash"
 
 
 def _api_key():
-    key = os.getenv("GEMINI_API_KEY")
-    if key:
-        return key
+    # Streamlit Cloud secret (preferred), then local environment variable.
     try:
-        return st.secrets.get("gemini_api_key")
+        key = st.secrets.get("gemini_api_key")
+        if key:
+            return str(key).strip()
+        key = st.secrets.get("GEMINI_API_KEY")
+        if key:
+            return str(key).strip()
     except Exception:
-        return None
+        pass
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 def available():
     return bool(_api_key())
 
 
-def _client():
-    from google import genai
-    return genai.Client(api_key=_api_key())
+def _generate(prompt):
+    """Create a fresh Gemini client for each request.
+
+    We intentionally do not cache the client. This avoids stale/closed-client
+    errors on Streamlit reruns and makes the AI layer safe after sleep/restart.
+    """
+    key = _api_key()
+    if not key:
+        return ""
+
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=key)
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+        )
+        return (getattr(response, "text", "") or "").strip()
+    except Exception as exc:
+        # Never let the optional AI layer crash the evidence-based application.
+        st.warning(f"Gemini is temporarily unavailable: {exc}")
+        return ""
 
 
 def _clean_skill(value):
@@ -42,25 +67,9 @@ def _candidate_table(skill_master, limit=160):
     return candidates.head(limit).to_dict("records")
 
 
-def _response_text(response):
-    return getattr(response, "text", "") or ""
-
-
-def _generate(prompt):
-    try:
-        response = _client().models.generate_content(
-            model=MODEL,
-            contents=prompt,
-        )
-        return _response_text(response)
-    except Exception as exc:
-        st.warning(f"AI advisor temporarily unavailable: {exc}")
-        return ""
-
-
 @st.cache_data(show_spinner=False)
 def suggest_skills(selected_skills, target_career="", skill_master=None, limit=8):
-    """Suggest only skills already present in the controlled skill library."""
+    """Rank only skills that already exist in the controlled skill library."""
     if not available() or skill_master is None or skill_master.empty:
         return pd.DataFrame()
 
@@ -77,14 +86,15 @@ Target career: {target_career or 'Not specified'}
 Current skills: {', '.join(selected) or 'None'}
 
 Choose up to {limit} additional skills from the supplied candidate library that
-would be most useful. Prefer complementary skills and skills supported by the
-market/O*NET signals. NEVER invent a skill and NEVER return a skill outside the
+would be most useful for this user's target career. Prefer complementary skills
+and skills supported by market frequency or O*NET technology signals.
+Do not invent skills. Every recommendation MUST exactly match a skill in the
 candidate library.
 
-Candidate library:
+Candidate library (JSON):
 {json.dumps(candidates, ensure_ascii=False)}
 
-Return one line per recommendation exactly:
+Return one line per recommendation exactly as:
 SKILL | short reason
 No heading, no bullets, no extra text."""
 
@@ -100,11 +110,14 @@ No heading, no bullets, no extra text."""
         if len(rows) >= limit:
             break
 
-    return pd.DataFrame(rows).drop_duplicates("skill").reset_index(drop=True) if rows else pd.DataFrame(columns=["skill", "reason"])
+    if not rows:
+        return pd.DataFrame(columns=["skill", "reason"])
+    return pd.DataFrame(rows).drop_duplicates("skill").reset_index(drop=True)
 
 
 @st.cache_data(show_spinner=False)
 def explain_skill_gaps(target_career, current_skills, gaps):
+    """Turn the evidence produced by the ML/O*NET layer into useful advice."""
     if not available() or gaps is None or gaps.empty:
         return ""
 
@@ -118,8 +131,8 @@ def explain_skill_gaps(target_career, current_skills, gaps):
 Target career: {target_career}
 Current skills: {', '.join(current_skills)}
 
-Treat the following ranking-engine evidence as authoritative. Do not invent
-market facts or change the ranking:
+The ranking engine produced the following evidence. Treat it as authoritative;
+do not invent additional market facts or change the ranking.
 {json.dumps(evidence, ensure_ascii=False)}
 
 Write a concise career plan with:
@@ -129,4 +142,4 @@ Write a concise career plan with:
 4. One sentence on what not to prioritize yet.
 Keep it under 250 words."""
 
-    return _generate(prompt).strip()
+    return _generate(prompt)
