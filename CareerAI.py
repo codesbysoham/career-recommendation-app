@@ -5,16 +5,15 @@ import re
 import pandas as pd
 import streamlit as st
 
-
-MODEL = "gpt-5.6-luna"
+MODEL = "gemini-2.5-flash"
 
 
 def _api_key():
-    key = os.getenv("OPENAI_API_KEY")
+    key = os.getenv("GEMINI_API_KEY")
     if key:
         return key
     try:
-        return st.secrets.get("openai_api_key")
+        return st.secrets.get("gemini_api_key")
     except Exception:
         return None
 
@@ -24,8 +23,8 @@ def available():
 
 
 def _client():
-    from openai import OpenAI
-    return OpenAI(api_key=_api_key())
+    from google import genai
+    return genai.Client(api_key=_api_key())
 
 
 def _clean_skill(value):
@@ -37,26 +36,31 @@ def _candidate_table(skill_master, limit=160):
     candidates = skill_master[cols].copy()
     if candidates.empty:
         return []
-    candidates = candidates.sort_values(
-        [c for c in ["market_frequency", "hot_technology", "in_demand"] if c in candidates.columns],
-        ascending=False,
-        kind="stable",
-    ).head(limit)
-    return candidates.to_dict("records")
+    sort_cols = [c for c in ["market_frequency", "hot_technology", "in_demand"] if c in candidates.columns]
+    if sort_cols:
+        candidates = candidates.sort_values(sort_cols, ascending=False, kind="stable")
+    return candidates.head(limit).to_dict("records")
 
 
 def _response_text(response):
-    return getattr(response, "output_text", "") or ""
+    return getattr(response, "text", "") or ""
+
+
+def _generate(prompt):
+    try:
+        response = _client().models.generate_content(
+            model=MODEL,
+            contents=prompt,
+        )
+        return _response_text(response)
+    except Exception as exc:
+        st.warning(f"AI advisor temporarily unavailable: {exc}")
+        return ""
 
 
 @st.cache_data(show_spinner=False)
 def suggest_skills(selected_skills, target_career="", skill_master=None, limit=8):
-    """Suggest only skills that already exist in our controlled skill library.
-
-    The LLM is a reasoning/ranking layer, not the source of truth. Candidate
-    skills come from the O*NET + market library and every returned skill is
-    validated against that library before reaching the UI.
-    """
+    """Suggest only skills already present in the controlled skill library."""
     if not available() or skill_master is None or skill_master.empty:
         return pd.DataFrame()
 
@@ -73,20 +77,20 @@ Target career: {target_career or 'Not specified'}
 Current skills: {', '.join(selected) or 'None'}
 
 Choose up to {limit} additional skills from the supplied candidate library that
-would be most useful for this user's target career. Prefer complementary skills
-and skills supported by market frequency or O*NET technology signals. Do not
-invent skills and do not return anything outside the candidate library.
+would be most useful. Prefer complementary skills and skills supported by the
+market/O*NET signals. NEVER invent a skill and NEVER return a skill outside the
+candidate library.
 
-Candidate library (JSON):
+Candidate library:
 {json.dumps(candidates, ensure_ascii=False)}
 
-Return one line per recommendation exactly as:
+Return one line per recommendation exactly:
 SKILL | short reason
 No heading, no bullets, no extra text."""
 
-    response = _client().responses.create(model=MODEL, input=prompt)
+    text = _generate(prompt)
     rows = []
-    for line in _response_text(response).splitlines():
+    for line in text.splitlines():
         if "|" not in line:
             continue
         raw_skill, reason = line.split("|", 1)
@@ -96,14 +100,11 @@ No heading, no bullets, no extra text."""
         if len(rows) >= limit:
             break
 
-    if not rows:
-        return pd.DataFrame(columns=["skill", "reason"])
-    return pd.DataFrame(rows).drop_duplicates("skill").reset_index(drop=True)
+    return pd.DataFrame(rows).drop_duplicates("skill").reset_index(drop=True) if rows else pd.DataFrame(columns=["skill", "reason"])
 
 
 @st.cache_data(show_spinner=False)
 def explain_skill_gaps(target_career, current_skills, gaps):
-    """Turn the evidence produced by the ML/O*NET layer into useful advice."""
     if not available() or gaps is None or gaps.empty:
         return ""
 
@@ -117,8 +118,8 @@ def explain_skill_gaps(target_career, current_skills, gaps):
 Target career: {target_career}
 Current skills: {', '.join(current_skills)}
 
-The ranking engine produced the following evidence. Treat it as authoritative;
-do not invent additional market facts or change the ranking.
+Treat the following ranking-engine evidence as authoritative. Do not invent
+market facts or change the ranking:
 {json.dumps(evidence, ensure_ascii=False)}
 
 Write a concise career plan with:
@@ -128,5 +129,4 @@ Write a concise career plan with:
 4. One sentence on what not to prioritize yet.
 Keep it under 250 words."""
 
-    response = _client().responses.create(model=MODEL, input=prompt)
-    return _response_text(response).strip()
+    return _generate(prompt).strip()
