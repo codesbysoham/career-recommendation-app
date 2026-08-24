@@ -7,37 +7,34 @@ from CareerClassifier import _download_postings
 
 POSTINGS_PATH = "data/postings.csv"
 
-# Only columns actually used by the dashboard, matcher, gap analyzer and
-# explorer. Reading the entire LinkedIn export wastes a lot of RAM on deploy.
-JOB_COLUMNS = [
-    "title", "company_name", "location", "description", "skills_desc",
+# Keep the normal dashboard/explorer table small. Large text columns are loaded
+# only by the feature that actually needs them.
+BASE_COLUMNS = [
+    "title", "company_name", "location",
     "formatted_work_type", "formatted_experience_level", "remote_allowed",
     "normalized_salary", "max_salary", "med_salary", "min_salary",
     "views", "applies", "job_posting_url",
 ]
 
 
-@st.cache_data(show_spinner=False)
-def load_postings():
-    """Load only the fields used by the application; do not build TF-IDF."""
+@st.cache_resource(show_spinner=False)
+def _read_header():
     _download_postings()
+    return list(pd.read_csv(POSTINGS_PATH, nrows=0).columns)
 
-    # Some dataset versions may not contain every optional field, so inspect
-    # the header first and request only the intersection.
-    header = pd.read_csv(POSTINGS_PATH, nrows=0)
-    available = [c for c in JOB_COLUMNS if c in header.columns]
-    postings = pd.read_csv(
-        POSTINGS_PATH,
-        usecols=available,
-        low_memory=False,
-    )
+
+def _read_columns(columns):
+    available = [c for c in columns if c in _read_header()]
+    return pd.read_csv(POSTINGS_PATH, usecols=available, low_memory=False)
+
+
+@st.cache_resource(show_spinner=False)
+def load_postings():
+    """Load only compact job fields used by dashboard/explorer/recommendations."""
+    postings = _read_columns(BASE_COLUMNS)
 
     defaults = {
-        "title": "",
-        "company_name": "Unknown",
-        "location": "Unknown",
-        "description": "",
-        "skills_desc": "",
+        "title": "", "company_name": "Unknown", "location": "Unknown",
         "formatted_work_type": "Unknown",
         "formatted_experience_level": "Unknown",
         "job_posting_url": "",
@@ -46,24 +43,16 @@ def load_postings():
         if col not in postings.columns:
             postings[col] = default
 
-    for col in [
-        "max_salary", "med_salary", "min_salary",
-        "normalized_salary", "views", "applies"
-    ]:
+    for col in ["max_salary", "med_salary", "min_salary", "normalized_salary", "views", "applies"]:
         if col not in postings.columns:
             postings[col] = np.nan
         postings[col] = pd.to_numeric(postings[col], errors="coerce")
 
-    for col in [
-        "title", "company_name", "location", "description", "skills_desc",
-        "formatted_work_type", "formatted_experience_level", "job_posting_url"
-    ]:
+    for col in ["title", "company_name", "location", "formatted_work_type", "formatted_experience_level", "job_posting_url"]:
         postings[col] = postings[col].fillna("").astype(str)
 
     if "remote_allowed" in postings.columns:
-        postings["remote_label"] = postings["remote_allowed"].map(
-            {1: "Remote", 0: "Not Remote"}
-        ).fillna("Unknown")
+        postings["remote_label"] = postings["remote_allowed"].map({1: "Remote", 0: "Not Remote"}).fillna("Unknown")
     else:
         postings["remote_label"] = "Unknown"
 
@@ -71,10 +60,27 @@ def load_postings():
 
 
 @st.cache_resource(show_spinner=False)
+def load_skill_postings():
+    """Load only title + skills text for market skill-frequency analysis."""
+    postings = _read_columns(["title", "skills_desc"])
+    for col in ["title", "skills_desc"]:
+        if col not in postings.columns:
+            postings[col] = ""
+        postings[col] = postings[col].fillna("").astype(str)
+    return postings
+
+
+@st.cache_resource(show_spinner=False)
 def load_job_engine():
-    """Build TF-IDF only when Career Matcher actually needs it."""
+    """Load title/description text and build TF-IDF only for Career Matcher."""
     postings = load_postings()
-    model_text = postings["title"] + " " + postings["description"]
+    text = _read_columns(["title", "description"])
+    for col in ["title", "description"]:
+        if col not in text.columns:
+            text[col] = ""
+        text[col] = text[col].fillna("").astype(str)
+
+    model_text = text["title"] + " " + text["description"]
     tfidf = TfidfVectorizer(
         max_features=5000,
         ngram_range=(1, 2),
