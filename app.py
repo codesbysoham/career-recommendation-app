@@ -1,3 +1,6 @@
+import re
+
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -14,25 +17,100 @@ try:
         get_occupation_skill_gaps,
         get_skill_gap_summary,
         load_onet_data,
-        recommend_jobs,
         top_counts,
         occupation_lookup,
     )
-    from JobEngine import load_job_engine, load_postings, load_skill_postings
+    from JobEngine import load_postings, load_skill_postings
 except Exception as e:
     st.error("The recommendation engine could not start.")
     st.exception(e)
     st.stop()
 
-# Startup loads only the small O*NET files. Large job text is lazy-loaded.
+# Startup loads only the small O*NET files. Large job-market data is lazy-loaded.
 skills_df, knowledge_df, occupations_df, software_df = load_onet_data()
+
 
 @st.cache_data(show_spinner=False)
 def get_base_skill_master():
     empty_postings = pd.DataFrame(columns=["title", "skills_desc"])
     return build_skill_master(skills_df, software_df, empty_postings)
 
+
 skill_master = get_base_skill_master()
+
+
+@st.cache_data(show_spinner=False)
+def safe_job_recommendations(selected_skills, top_n=10):
+    """Memory-safe job matching for any skill selection.
+
+    This deliberately does NOT build a TF-IDF matrix over all 123k postings.
+    Instead it scans the compact title/skills fields in bounded chunks and
+    scores exact skill-phrase matches. This keeps Career Matcher predictable
+    on Streamlit Cloud regardless of which skills the user selects.
+    """
+    selected_skills = tuple(dict.fromkeys(str(s).strip() for s in selected_skills if str(s).strip()))
+    if not selected_skills:
+        return pd.DataFrame()
+
+    base = load_postings()
+    skill_text = load_skill_postings()
+
+    n = min(len(base), len(skill_text))
+    base = base.iloc[:n].copy()
+    skill_text = skill_text.iloc[:n].copy()
+
+    # Score in chunks so we never create a large intermediate matrix.
+    scores = np.zeros(n, dtype=np.float32)
+    matched = np.zeros(n, dtype=np.int16)
+    chunk_size = 10000
+
+    patterns = []
+    for skill in selected_skills:
+        clean = re.sub(r"\s+", " ", skill.lower()).strip()
+        if not clean:
+            continue
+        # Boundary-aware phrase matching. re.escape makes skills such as
+        # C++, C#, .NET, Node.js and Power BI safe.
+        patterns.append(re.compile(r"(?<![a-z0-9])" + re.escape(clean) + r"(?![a-z0-9])", re.I))
+
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        titles = skill_text.iloc[start:end]["title"].fillna("").astype(str)
+        skills = skill_text.iloc[start:end]["skills_desc"].fillna("").astype(str)
+        chunk_scores = np.zeros(end - start, dtype=np.float32)
+        chunk_matched = np.zeros(end - start, dtype=np.int16)
+
+        for pattern in patterns:
+            title_hit = titles.str.contains(pattern, na=False).to_numpy()
+            skill_hit = skills.str.contains(pattern, na=False).to_numpy()
+            hit = title_hit | skill_hit
+            # Skills listed in skills_desc are stronger evidence than a title
+            # mention, while title matches still contribute useful signal.
+            chunk_scores += skill_hit.astype(np.float32) * 1.0
+            chunk_scores += (title_hit & ~skill_hit).astype(np.float32) * 0.7
+            chunk_matched += hit.astype(np.int16)
+
+        scores[start:end] = chunk_scores
+        matched[start:end] = chunk_matched
+
+    result = base.copy()
+    result["Skills Matched"] = matched
+    result["Match Score"] = (scores / max(len(patterns), 1) * 100).round(1)
+    result = result[result["Skills Matched"] > 0]
+
+    if result.empty:
+        return pd.DataFrame(columns=[
+            "title", "company_name", "location", "formatted_work_type",
+            "formatted_experience_level", "remote_label", "normalized_salary",
+            "Skills Matched", "Match Score", "job_posting_url"
+        ])
+
+    return result.sort_values(
+        ["Match Score", "Skills Matched", "views"],
+        ascending=[False, False, False],
+        kind="stable",
+    ).head(top_n).reset_index(drop=True)
+
 
 page = st.sidebar.radio(
     "Navigate",
@@ -83,7 +161,11 @@ if page == "📊 Market Dashboard":
 elif page == "🎯 Career Matcher":
     st.header("🎯 Career Matcher")
     st.write("Choose from one unified skill library containing O*NET skills, O*NET workplace technologies, and controlled job-market evidence.")
-    selected = st.multiselect("What skills do you have?", skill_master["skill"].tolist(), placeholder="Search Python, SQL, Excel, Power BI, Critical Thinking...")
+    selected = st.multiselect(
+        "What skills do you have?",
+        skill_master["skill"].tolist(),
+        placeholder="Search Python, SQL, Excel, Power BI, Critical Thinking...",
+    )
 
     if selected:
         meta = skill_master[skill_master["skill"].isin(selected)]
@@ -98,10 +180,18 @@ elif page == "🎯 Career Matcher":
         else:
             st.info("No O*NET occupation profile matched the selected skills. Use the job recommendations below for direct market matching.")
 
-        with st.spinner("Loading job-market recommendations..."):
-            postings, tfidf, tfidf_matrix = load_job_engine()
+        with st.spinner("Finding matching jobs..."):
+            job_matches = safe_job_recommendations(selected, top_n=10)
         st.subheader("Recommended Job Postings")
-        st.dataframe(recommend_jobs(selected, tfidf, tfidf_matrix, postings, top_n=10), width="stretch", hide_index=True)
+        if job_matches.empty:
+            st.info("No postings matched those skills. Try adding another skill or choosing a broader skill.")
+        else:
+            display_cols = [c for c in [
+                "title", "company_name", "location", "formatted_work_type",
+                "formatted_experience_level", "remote_label", "normalized_salary",
+                "Skills Matched", "Match Score", "job_posting_url"
+            ] if c in job_matches.columns]
+            st.dataframe(job_matches[display_cols], width="stretch", hide_index=True)
     else:
         st.info("Select one or more skills to start.")
 
