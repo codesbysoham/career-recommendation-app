@@ -6,7 +6,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Career Intelligence Dashboard", page_icon="💼", layout="wide")
 st.title("💼 Career Intelligence Dashboard")
-st.caption("Job-market analytics, career matching and skill-gap analysis.")
+st.caption("ML-driven job-market analytics, career matching and skill-gap analysis.")
 
 try:
     from CareerClassifier import (
@@ -124,6 +124,7 @@ if page == "📊 Market Dashboard":
 elif page == "🎯 Career Matcher":
     st.header("🎯 Career Matcher")
     st.write("Choose from one unified skill library containing O*NET skills, O*NET workplace technologies, and controlled job-market evidence.")
+    st.info("The ML/O*NET engine produces the career and job rankings. Gemini is optional and only helps interpret or extend the existing evidence.")
     selected = st.multiselect("What skills do you have?", skill_master["skill"].tolist(), placeholder="Search Python, SQL, Excel, Power BI, Critical Thinking...")
     if selected:
         meta = skill_master[skill_master["skill"].isin(selected)]
@@ -131,12 +132,12 @@ elif page == "🎯 Career Matcher":
             evidence_cols = [c for c in ["skill", "source", "market_frequency", "hot_technology", "in_demand"] if c in meta.columns]
             st.dataframe(meta[evidence_cols], width="stretch", hide_index=True)
 
-        with st.expander("✨ AI Skill Advisor", expanded=False):
-            st.caption("Gemini ranks complementary skills from the existing O*NET + market skill library; it does not invent new skills.")
+        with st.expander("✨ AI-assisted skill analysis", expanded=False):
+            st.caption("Gemini can surface complementary skills from the existing O*NET + market library. It does not replace the ML ranking engine or invent skills.")
             if not ai_available():
-                st.info("AI is optional. Add your Gemini API key in Streamlit Secrets to enable this advisor; the rest of the matcher works without it.")
-            elif st.button("Suggest complementary skills", key="matcher_ai_suggest"):
-                with st.spinner("Gemini is analyzing your skill combination..."):
+                st.info("AI is optional. Add your Gemini API key in Streamlit Secrets to enable this analysis; the ML matcher works without it.")
+            elif st.button("Analyze complementary skills", key="matcher_ai_suggest"):
+                with st.spinner("Gemini is analyzing the existing skill evidence..."):
                     ai_suggestions = suggest_skills(selected, skill_master=skill_master, limit=8)
                 if ai_suggestions.empty:
                     st.warning("Gemini could not produce validated suggestions from the current skill library.")
@@ -146,7 +147,13 @@ elif page == "🎯 Career Matcher":
         matches = career_match(selected, skills_df, top_n=10)
         if not matches.empty:
             st.subheader("Best-Matching Careers")
+            st.caption("ML score is based on the O*NET importance ratings of the skills in your profile. O*NET importance is rated on a 1–5 scale.")
             st.dataframe(matches, width="stretch", hide_index=True)
+            with st.expander("How the career model works"):
+                st.markdown(
+                    "**Career matching pipeline:** selected skills → canonical skill mapping → O*NET occupation skill profiles → importance-weighted match score → ranked occupations. "
+                    "The model uses O*NET occupational evidence as its source of truth; Gemini is not involved in the score."
+                )
         else:
             st.info("No O*NET occupation profile matched the selected skills. Use the job recommendations below for direct market matching.")
         with st.spinner("Finding matching jobs..."):
@@ -155,6 +162,7 @@ elif page == "🎯 Career Matcher":
         if job_matches.empty:
             st.info("No postings matched those skills. Try adding another skill or choosing a broader skill.")
         else:
+            st.caption("Job match score combines skill hits in structured job-skill text and job titles; structured skill hits receive higher weight.")
             display_cols = [c for c in ["title", "company_name", "location", "formatted_work_type", "formatted_experience_level", "remote_label", "normalized_salary", "Skills Matched", "Match Score", "job_posting_url"] if c in job_matches.columns]
             st.dataframe(job_matches[display_cols], width="stretch", hide_index=True)
     else:
@@ -171,13 +179,13 @@ elif page == "🧩 Skill Gap Analyzer":
     st.caption(f"O*NET-SOC: **{soc_code}**")
     selected = st.multiselect("Your current skills", skill_master["skill"].tolist(), placeholder="Search and select skills...", key="gap_current_skills")
 
-    with st.expander("✨ AI Suggested Skills", expanded=not selected):
-        st.caption("Gemini suggestions are restricted to skills already present in the app's O*NET + market library.")
+    with st.expander("✨ AI-assisted skill analysis", expanded=not selected):
+        st.caption("Gemini is constrained to the app's existing O*NET + market skill library. The evidence-based gap model remains the source of truth.")
         if not ai_available():
-            st.info("Add your Gemini API key in Streamlit Secrets to enable AI suggestions. The evidence-based skill-gap model remains functional without it.")
+            st.info("Add your Gemini API key in Streamlit Secrets to enable AI assistance. The evidence-based skill-gap model remains functional without it.")
         else:
-            if st.button("Suggest skills for this career", key="gap_ai_suggest"):
-                with st.spinner("Gemini is ranking skills for this career..."):
+            if st.button("Analyze useful skills for this career", key="gap_ai_suggest"):
+                with st.spinner("Gemini is analyzing the existing skill library..."):
                     suggestions = suggest_skills(selected, target_career=occupation_title, skill_master=skill_master, limit=10)
                 st.session_state["gap_ai_suggestions"] = suggestions
             suggestions = st.session_state.get("gap_ai_suggestions", pd.DataFrame())
@@ -185,13 +193,13 @@ elif page == "🧩 Skill Gap Analyzer":
                 st.dataframe(suggestions, width="stretch", hide_index=True)
                 addable = [s for s in suggestions["skill"].tolist() if s not in selected]
                 if addable:
-                    add_selected = st.multiselect("Add suggested skills to your profile", addable, key="gap_ai_add")
+                    add_selected = st.multiselect("Add analyzed skills to your profile", addable, key="gap_ai_add")
                     if st.button("Add selected skills", key="gap_ai_add_button") and add_selected:
                         st.session_state["gap_current_skills"] = list(dict.fromkeys(list(selected) + add_selected))
                         st.rerun()
 
     if not selected:
-        st.info("Select one or more current skills, or use the AI suggestions above to build your profile.")
+        st.info("Select one or more current skills, or use the AI analysis above to build your profile.")
     else:
         with st.spinner("Loading job-market evidence..."):
             postings = load_skill_postings()
@@ -212,7 +220,7 @@ elif page == "🧩 Skill Gap Analyzer":
                 st.dataframe(medium[display_gap_cols], width="stretch", hide_index=True)
             st.info(get_skill_gap_summary(gaps))
             with st.expander("🤖 AI Career Coach"):
-                st.caption("The ML/O*NET engine determines the evidence and ranking. Gemini only explains that evidence and turns it into a practical plan.")
+                st.caption("The ML/O*NET engine determines the evidence and ranking. Gemini only explains that evidence and turns it into a practical learning plan.")
                 if not ai_available():
                     st.info("Add your Gemini API key in Streamlit Secrets to enable the AI explanation.")
                 elif st.button("Explain my skill gaps", key="gap_ai_explain"):
@@ -222,8 +230,8 @@ elif page == "🧩 Skill Gap Analyzer":
                         st.markdown(explanation)
                     else:
                         st.warning("Gemini could not generate an explanation right now.")
-            with st.expander("How did the model rank these?"):
-                st.markdown("**Priority score combines:** O*NET importance, Hot Technology, In Demand, and skill co-occurrence in job postings. Skills already selected are removed before ranking.")
+            with st.expander("How did the ML model rank these?"):
+                st.markdown("**Priority score combines:** 40% O*NET importance, 25% Hot Technology, 20% In Demand, and 15% skill co-occurrence with your current skills in job postings. Skills already selected are removed before ranking.")
             st.subheader("📈 Your Current Profile")
             selected_df = skill_master[skill_master["skill"].isin(selected)].copy()
             profile_cols = [c for c in ["skill", "source", "market_frequency", "hot_technology", "in_demand"] if c in selected_df.columns]
