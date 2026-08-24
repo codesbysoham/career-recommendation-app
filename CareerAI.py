@@ -6,7 +6,8 @@ import pandas as pd
 import streamlit as st
 
 
-MODEL = "gemini-2.5-flash"
+# Gemini 2.5 Flash was shut down for new users. Use the current stable model.
+MODEL = "gemini-3.6-flash"
 
 
 def _api_key():
@@ -30,8 +31,8 @@ def available():
 def _generate(prompt):
     """Create a fresh Gemini client for each request.
 
-    We intentionally do not cache the client. This avoids stale/closed-client
-    errors on Streamlit reruns and makes the AI layer safe after sleep/restart.
+    The AI layer is optional: any Gemini failure returns an empty response
+    rather than taking down the evidence-based career application.
     """
     key = _api_key()
     if not key:
