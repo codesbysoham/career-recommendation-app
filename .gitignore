@@ -1,2 +1,9 @@
 data/postings.csv
 __pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+.streamlit/secrets.toml
+.DS_Store
